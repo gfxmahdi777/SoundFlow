@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SoundFlow — Windows System Tray Audio Controller</title>
+    <meta name="description" content="Every App. Every Device. Your Control. A lightweight, real-time Windows 10 & 11 system tray audio controller and per-application WASAPI router." />
+    <meta property="og:title" content="SoundFlow — Windows System Tray Audio Controller" />
+    <meta property="og:description" content="Every App. Every Device. Your Control. A lightweight, real-time Windows 10 & 11 system tray audio controller and per-application WASAPI router." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400..700;1,9..40,400..700&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet" />
+    <script>
+      (function () {
+        try {
+          var currentFetch = window.fetch ? window.fetch.bind(window) : undefined;
+          var desc = Object.getOwnPropertyDescriptor(window, 'fetch') || Object.getOwnPropertyDescriptor(Window.prototype, 'fetch');
+          if (!desc || desc.configurable !== false) {
+            Object.defineProperty(window, 'fetch', {
+              configurable: true,
+              enumerable: true,
+              get: function () {
+                return currentFetch;
+              },
+              set: function (fn) {
+                if (typeof fn === 'function') {
+                  currentFetch = fn;
+                }
+              }
+            });
+          }
+        } catch (_e) {}
+
+        window.addEventListener(
+          'error',
+          function (event) {
+            if (
+              event &&
+              ((typeof event.message === 'string' && event.message.indexOf('Cannot set property fetch') !== -1) ||
+                (typeof event.filename === 'string' && event.filename.indexOf('chrome-extension://') === 0))
+            ) {
+              event.stopImmediatePropagation();
+              event.preventDefault();
+            }
+          },
+          true
+        );
+      })();
+    </script>
+  </head>
+  <body class="bg-[#F5F8FF] text-[#172033] antialiased selection:bg-[#3478F6]/20 selection:text-[#172033] overflow-hidden">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

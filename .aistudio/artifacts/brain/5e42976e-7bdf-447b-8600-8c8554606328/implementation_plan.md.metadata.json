@@ -1,0 +1,6 @@
+{
+  "summary": "Comprehensive architectural and product implementation plan for SoundFlow, a Windows 10/11 System Tray Audio Controller with live multi-application Web Audio routing, hardware output sink selection, Windows system tray simulation, hot-plug device recovery, global shortcuts, and complete Tauri 2 + Rust WASAPI source code export.",
+  "updatedAt": "2026-11-05T15:08:06.996964223Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

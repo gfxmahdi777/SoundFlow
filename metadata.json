@@ -1,0 +1,6 @@
+{
+  "name": "SoundFlow — Windows System Tray Audio Controller",
+  "description": "Every App. Every Device. Your Control. A lightweight, real-time Windows 10 & 11 system tray audio controller and per-application WASAPI router.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

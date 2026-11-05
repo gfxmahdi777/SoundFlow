@@ -1,0 +1,172 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --background: #F5F8FF;
+    --glass-surface: rgba(255, 255, 255, 0.72);
+    --card-bg: rgba(255, 255, 255, 0.65);
+    --primary: #3478F6;
+    --secondary-blue: #70A5FF;
+    --text-main: #172033;
+    --text-secondary: #758198;
+    --glass-border: rgba(255, 255, 255, 0.85);
+    --status-connected: #16A36A;
+    --font-display: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-sans: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: #F5F8FF;
+    color: #172033;
+    margin: 0;
+    padding: 0;
+    user-select: none;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: var(--font-display);
+  }
+
+  .font-mono, .tabular-nums {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Compositor-only smooth popup & menu animations */
+@keyframes sfPopupIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes sfDropdownIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes sfDropdownUpIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.sf-animate-popup {
+  animation: sfPopupIn 180ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  will-change: transform, opacity;
+}
+
+.sf-animate-dropdown {
+  animation: sfDropdownIn 140ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  will-change: transform, opacity;
+}
+
+.sf-animate-dropdown-up {
+  animation: sfDropdownUpIn 140ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  will-change: transform, opacity;
+}
+
+/* Precision Range Slider for SoundFlow Glassmorphism White Volume Controls */
+input[type="range"].soundflow-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  margin: 0;
+}
+
+input[type="range"].soundflow-slider::-webkit-slider-runnable-track {
+  height: 16px;
+  background: transparent;
+  border: none;
+}
+
+input[type="range"].soundflow-slider::-moz-range-track {
+  height: 16px;
+  background: transparent;
+  border: none;
+}
+
+input[type="range"].soundflow-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 14px;
+  width: 14px;
+  border-radius: 50%;
+  background: #FFFFFF;
+  border: 2.5px solid #3478F6;
+  margin-top: 1px;
+  box-shadow: 0 2px 6px rgba(52, 120, 246, 0.32), 0 1px 2px rgba(23, 32, 51, 0.14);
+  transition: transform 120ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 120ms ease, border-color 120ms ease;
+}
+
+input[type="range"].soundflow-slider::-moz-range-thumb {
+  height: 14px;
+  width: 14px;
+  border-radius: 50%;
+  background: #FFFFFF;
+  border: 2.5px solid #3478F6;
+  box-shadow: 0 2px 6px rgba(52, 120, 246, 0.32), 0 1px 2px rgba(23, 32, 51, 0.14);
+  transition: transform 120ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 120ms ease;
+}
+
+input[type="range"].soundflow-slider:hover::-webkit-slider-thumb {
+  transform: scale(1.16);
+  box-shadow: 0 3px 10px rgba(52, 120, 246, 0.45), 0 1px 3px rgba(23, 32, 51, 0.18);
+}
+
+input[type="range"].soundflow-slider:active::-webkit-slider-thumb {
+  transform: scale(1.08);
+  background: #3478F6;
+}
+
+input[type="range"].soundflow-slider:focus-visible {
+  outline: none;
+}
+
+input[type="range"].soundflow-slider:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px rgba(52, 120, 246, 0.28);
+}
+
+/* Subtle custom scrollbars for frosted glass popup list */
+.soundflow-scroll::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+.soundflow-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.soundflow-scroll::-webkit-scrollbar-thumb {
+  background: rgba(117, 129, 152, 0.24);
+  border-radius: 999px;
+}
+
+.soundflow-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(52, 120, 246, 0.5);
+}
