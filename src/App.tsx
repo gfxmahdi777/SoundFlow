@@ -14,6 +14,16 @@ import {
   SoundFlowConfig,
 } from './types/soundflow';
 import { soundFlowEngine } from './services/audioEngine';
+import {
+  isTauriRuntime,
+  subscribeToTauriTrayEvents,
+  tauriGetAudioDevices,
+  tauriGetAudioSessions,
+  tauriSetAppAudioDevice,
+  tauriSetAppMute,
+  tauriSetAppVolume,
+  tauriSetDefaultAudioDevice,
+} from './services/tauriBridge';
 import { SoundFlowPopup } from './components/SoundFlowPopup';
 import {
   AdvancedSettingsModal,
@@ -248,6 +258,7 @@ export default function App() {
   const [systemTime, setSystemTime] = useState<string>('');
   const [systemDate, setSystemDate] = useState<string>('');
   const [engineRunning, setEngineRunning] = useState<boolean>(true);
+  const isNativeTauri = isTauriRuntime();
 
   const [telemetry, setTelemetry] = useState<AudioTelemetryFrame>({
     appLevels: {},
@@ -292,25 +303,74 @@ export default function App() {
     []
   );
 
-  // Load persisted config from Express server on mount
+  // Sync devices and sessions from Tauri 2 Rust Core Audio backend when running natively
+  const refreshFromTauriBackend = useCallback(async () => {
+    if (!isTauriRuntime()) return;
+    const [nativeDevices, nativeSessions] = await Promise.all([
+      tauriGetAudioDevices(),
+      tauriGetAudioSessions(),
+    ]);
+
+    if (nativeDevices && nativeDevices.length > 0) {
+      const defaultDev = nativeDevices.find((d) => d.isDefault) || nativeDevices[0];
+      setConfig((prev) => ({
+        ...prev,
+        defaultDeviceId: defaultDev.id,
+        devices: nativeDevices,
+        apps: nativeSessions && nativeSessions.length > 0 ? nativeSessions : prev.apps,
+      }));
+      appendLog(
+        'system',
+        `Synchronized ${nativeDevices.length} Core Audio endpoints and ${
+          nativeSessions?.length ?? 0
+        } WASAPI sessions via Tauri IPC`
+      );
+    }
+  }, [appendLog]);
+
+  // Load persisted config on mount (Tauri IPC in desktop runtime, Express API in web preview)
   useEffect(() => {
-    fetch('/api/config')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (data && Array.isArray(data.devices) && Array.isArray(data.apps)) {
-          setConfig((prev) => ({
-            ...prev,
-            ...data,
-          }));
-        }
-      })
-      .catch(() => {
-        // Fallback to local state
-      });
+    if (isTauriRuntime()) {
+      void refreshFromTauriBackend();
+    } else {
+      fetch('/api/config')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (data && Array.isArray(data.devices) && Array.isArray(data.apps)) {
+            setConfig((prev) => ({
+              ...prev,
+              ...data,
+            }));
+          }
+        })
+        .catch(() => {
+          // Fallback to local state
+        });
+    }
 
     void soundFlowEngine.enumeratePhysicalSinks().then((sinks) => {
       setPhysicalSinks(sinks);
     });
+  }, [refreshFromTauriBackend]);
+
+  // Subscribe to native Tauri System Tray events
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let unlisteners: Array<() => void> = [];
+    void subscribeToTauriTrayEvents({
+      onTogglePause: () => {
+        setConfig((prev) => ({ ...prev, routingActive: !prev.routingActive }));
+      },
+      onOpenSettings: () => {
+        setIsAdvancedSettingsOpen(true);
+      },
+    }).then((list) => {
+      unlisteners = list;
+    });
+
+    return () => {
+      unlisteners.forEach((u) => u());
+    };
   }, []);
 
   // Debounced persistence to Express backend JSON store + localStorage
@@ -320,6 +380,8 @@ export default function App() {
     } catch {
       // Ignore storage quota errors
     }
+
+    if (isTauriRuntime()) return;
 
     if (saveTimeoutRef.current) {
       window.clearTimeout(saveTimeoutRef.current);
@@ -399,6 +461,9 @@ export default function App() {
         const targetApp = prev.apps.find((a) => a.id === appId);
         if (!targetApp) return prev;
 
+        // Invoke Tauri 2 Rust Core Audio command (`set_app_audio_device`) when in native runtime
+        void tauriSetAppAudioDevice(targetApp.pid, targetDeviceId);
+
         const updatedApps = prev.apps.map((app) => {
           if (app.id !== appId) return app;
           return {
@@ -457,6 +522,9 @@ export default function App() {
         const targetApp = prev.apps.find((a) => a.id === appId);
         if (!targetApp) return prev;
 
+        // Invoke Tauri 2 Rust Core Audio command (`set_app_volume`) when in native runtime
+        void tauriSetAppVolume(targetApp.pid, clamped);
+
         const updatedApps = prev.apps.map((app) =>
           app.id === appId ? { ...app, volume: clamped, muted: isMuted } : app
         );
@@ -492,6 +560,7 @@ export default function App() {
         const nextMuted = !targetApp.muted;
 
         soundFlowEngine.setAppVolumeFast(appId, targetApp.volume, nextMuted);
+        void tauriSetAppMute(targetApp.pid, nextMuted);
 
         const updatedApps = prev.apps.map((app) =>
           app.id === appId ? { ...app, muted: nextMuted } : app
@@ -517,6 +586,8 @@ export default function App() {
   const handleSelectDefaultDevice = useCallback(
     (deviceId: string) => {
       ensureAudioEngineReady();
+      void tauriSetDefaultAudioDevice(deviceId);
+
       setConfig((prev) => {
         const targetDev = prev.devices.find((d) => d.id === deviceId);
         if (!targetDev || targetDev.status !== 'connected') return prev;
@@ -749,6 +820,10 @@ export default function App() {
   }, [audibleMonitor, appendLog]);
 
   const handleResetSavedPreferences = useCallback(() => {
+    if (isTauriRuntime()) {
+      void refreshFromTauriBackend();
+      return;
+    }
     fetch('/api/config/reset', { method: 'POST' })
       .then((r) => (r.ok ? r.json() : null))
       .then((resetData) => {
@@ -760,7 +835,7 @@ export default function App() {
       .catch(() => {
         setConfig(INITIAL_FALLBACK_CONFIG);
       });
-  }, [appendLog]);
+  }, [appendLog, refreshFromTauriBackend]);
 
   // Global Keyboard Shortcuts Listener
   useEffect(() => {
@@ -805,6 +880,91 @@ export default function App() {
   }, [config, appendLog, handleToggleAppMute, handleSelectDefaultDevice, persistConfig]);
 
   const connectedDevices = config.devices.filter((d) => d.status === 'connected');
+
+  const handleRefreshSessionsAndDevices = useCallback(() => {
+    if (isTauriRuntime()) {
+      void refreshFromTauriBackend();
+    } else {
+      appendLog(
+        'process',
+        `Refreshed Windows audio sessions (${config.apps.length} active processes, ${connectedDevices.length} connected endpoints)`
+      );
+    }
+  }, [refreshFromTauriBackend, appendLog, config.apps.length, connectedDevices.length]);
+
+  // If running inside the native 400x560 Tauri desktop window, render the popup directly
+  if (isNativeTauri) {
+    return (
+      <div className="w-screen h-screen overflow-hidden bg-transparent flex items-center justify-center">
+        <SoundFlowPopup
+          isOpen={true}
+          routingActive={config.routingActive}
+          onToggleRoutingActive={() =>
+            persistConfig({ ...config, routingActive: !config.routingActive })
+          }
+          devices={config.devices}
+          defaultDeviceId={config.defaultDeviceId}
+          onSelectDefaultDevice={handleSelectDefaultDevice}
+          apps={config.apps}
+          onAssignAppDevice={handleAssignAppDevice}
+          onChangeAppVolume={handleChangeAppVolume}
+          onToggleAppMute={handleToggleAppMute}
+          onRefreshApps={handleRefreshSessionsAndDevices}
+          onOpenAdvancedSettings={() => setIsAdvancedSettingsOpen(true)}
+          telemetry={telemetry}
+        />
+
+        <AdvancedSettingsModal
+          isOpen={isAdvancedSettingsOpen}
+          onClose={() => setIsAdvancedSettingsOpen(false)}
+          devices={config.devices}
+          defaultDeviceId={config.defaultDeviceId}
+          onSelectDefaultDevice={handleSelectDefaultDevice}
+          onToggleDeviceConnection={handleToggleDeviceConnection}
+          apps={config.apps}
+          launchableApps={LAUNCHABLE_APPS}
+          savedPreferences={config.savedPreferences}
+          onToggleLaunchApp={handleToggleLaunchApp}
+          onToggleAppPlayback={handleToggleAppPlayback}
+          launchAtStartup={config.launchAtStartup}
+          onToggleLaunchAtStartup={() =>
+            persistConfig({ ...config, launchAtStartup: !config.launchAtStartup })
+          }
+          minimizeToTray={config.minimizeToTray}
+          onToggleMinimizeToTray={() =>
+            persistConfig({ ...config, minimizeToTray: !config.minimizeToTray })
+          }
+          autoRestoreOnReconnect={config.autoRestoreOnReconnect}
+          onToggleAutoRestore={() =>
+            persistConfig({
+              ...config,
+              autoRestoreOnReconnect: !config.autoRestoreOnReconnect,
+            })
+          }
+          shortcuts={config.shortcuts}
+          onUpdateShortcut={(key: keyof GlobalShortcutsConfig, value: string) =>
+            persistConfig({
+              ...config,
+              shortcuts: { ...config.shortcuts, [key]: value },
+            })
+          }
+          onResetSavedPreferences={handleResetSavedPreferences}
+          physicalSinks={physicalSinks}
+          onBindPhysicalSink={(deviceId, sinkId) => {
+            void soundFlowEngine.bindHardwareSink(deviceId, sinkId);
+          }}
+          audibleMonitor={audibleMonitor}
+          onToggleAudibleMonitor={handleToggleAudibleMonitor}
+          telemetry={telemetry}
+          logs={logs}
+          onOpenTauriCode={() => {
+            setIsAdvancedSettingsOpen(false);
+            setIsCodeModalOpen(true);
+          }}
+        />
+      </div>
+    );
+  }
 
   return (
     <div
@@ -853,12 +1013,7 @@ export default function App() {
             onAssignAppDevice={handleAssignAppDevice}
             onChangeAppVolume={handleChangeAppVolume}
             onToggleAppMute={handleToggleAppMute}
-            onRefreshApps={() => {
-              appendLog(
-                'process',
-                `Refreshed Windows audio sessions (${config.apps.length} active processes, ${connectedDevices.length} connected endpoints)`
-              );
-            }}
+            onRefreshApps={handleRefreshSessionsAndDevices}
             onOpenAdvancedSettings={() => setIsAdvancedSettingsOpen(true)}
             telemetry={telemetry}
           />
