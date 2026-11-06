@@ -306,20 +306,6 @@ export const SoundFlowPopup: React.FC<SoundFlowPopupProps> = React.memo(
                       Connected
                     </span>
                   </div>
-
-                  {/* Bottom full-width live device peak hairline */}
-                  <div className="pointer-events-none absolute bottom-0 left-0 right-0 h-[2px] bg-transparent overflow-hidden">
-                    <div
-                      style={{
-                        width: `${meterPct}%`,
-                        opacity: isMeterActive ? 0.9 : 0,
-                        background: getMeterBarGradient(rawPeak),
-                        transition:
-                          'width 75ms ease-out, background-color 0.1s ease, opacity 75ms ease-out',
-                      }}
-                      className="h-full"
-                    />
-                  </div>
                 </div>
               );
             })}
@@ -386,9 +372,6 @@ export const SoundFlowPopup: React.FC<SoundFlowPopupProps> = React.memo(
                     ? Math.max(0, Math.min(1, appLevel.peak || 0))
                     : 0;
                 const isPeakActive = rawPeak > 0.005;
-                const peakWidthPct = isPeakActive
-                  ? Math.min(100, Math.round(rawPeak * 100))
-                  : 0;
                 const sliderOverlayPct = isPeakActive
                   ? Math.min(app.volume, Math.round(rawPeak * (app.volume || 100)))
                   : 0;
@@ -570,43 +553,27 @@ export const SoundFlowPopup: React.FC<SoundFlowPopupProps> = React.memo(
                       <div
                         onDoubleClick={() => onChangeAppVolume(app.id, 85)}
                         title="Drag or scroll wheel to adjust volume (Double-click for 85%)"
-                        className="relative flex-1 flex flex-col justify-center h-5"
+                        className="relative flex-1 flex items-center h-4"
                       >
-                        {/* Volume Track + Live Bouncing Peak Overlay */}
-                        <div className="w-full h-[6px] rounded-full bg-[#E3EAF6] overflow-hidden relative pointer-events-none">
+                        {/* Unified Slider Track with Live Audio Meter Background Fill */}
+                        <div className="relative w-full h-[6px] rounded-full bg-[#E3EAF6] overflow-hidden pointer-events-none">
+                          {/* Subtle static volume limit indicator */}
                           <div
-                            className="h-full rounded-full"
+                            className="absolute inset-y-0 left-0 rounded-full"
                             style={{
                               width: `${app.muted ? 0 : app.volume}%`,
                               background: isUnassigned
-                                ? '#94A3B8'
-                                : 'linear-gradient(90deg, #3478F6 0%, #70A5FF 100%)',
+                                ? 'rgba(148, 163, 184, 0.35)'
+                                : 'rgba(52, 120, 246, 0.22)',
                             }}
                           />
-                          {/* Smooth 75ms ease-out peak overlay inside slider bar */}
+                          {/* Dynamic Live Audio Peak Meter Layer (bounces up to current volume thumb) */}
                           <div
-                            className="absolute top-0 left-0 h-full rounded-full pointer-events-none"
+                            className="absolute inset-y-0 left-0 rounded-full"
                             style={{
                               width: `${sliderOverlayPct}%`,
-                              opacity: isPeakActive ? 0.85 : 0,
-                              background: getMeterBarGradient(rawPeak),
-                              transition:
-                                'width 75ms ease-out, background-color 0.1s ease, opacity 75ms ease-out',
-                            }}
-                          />
-                        </div>
-
-                        {/* Dedicated Slim Real-Time VU Meter Bar directly under the slider */}
-                        <div className="w-full h-[3px] mt-[3px] rounded-full bg-[#E3EAF6]/60 overflow-hidden pointer-events-none">
-                          <div
-                            className="h-full rounded-full"
-                            style={{
-                              width: `${peakWidthPct}%`,
                               opacity: isPeakActive ? 1 : 0,
                               background: getMeterBarGradient(rawPeak),
-                              boxShadow: isPeakActive
-                                ? '0 0 6px rgba(22, 163, 106, 0.45)'
-                                : 'none',
                               transition:
                                 'width 75ms ease-out, background-color 0.1s ease, opacity 75ms ease-out',
                             }}
@@ -619,7 +586,7 @@ export const SoundFlowPopup: React.FC<SoundFlowPopupProps> = React.memo(
                           max={100}
                           value={app.muted ? 0 : app.volume}
                           onChange={(e) => onChangeAppVolume(app.id, Number(e.target.value))}
-                          className="soundflow-slider absolute inset-0 w-full h-full"
+                          className="soundflow-slider absolute inset-0 z-10 w-full h-full bg-transparent"
                           aria-label={`${displayAppName} volume`}
                         />
                       </div>
