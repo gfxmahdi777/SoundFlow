@@ -6,7 +6,7 @@ mod audio_engine;
 mod com_policy;
 
 use std::sync::Mutex;
-use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
 
 #[cfg(target_os = "windows")]
@@ -181,25 +181,49 @@ fn main() {
     let builder = tauri::Builder::default()
         .manage(Mutex::new(CoreAudioEngine::new()))
         .setup(|app| {
-            // Force show the window immediately on startup (without .unwrap() panics)
             if let Some(window) = app.get_webview_window("main") {
+                // Force show and bring to front on startup
                 let _ = window.show();
+                let _ = window.set_always_on_top(true);
                 let _ = window.set_focus();
+
+                // Auto-hide when clicking outside (blur) and keep running in tray on close
+                let window_clone = window.clone();
+                window.on_window_event(move |event| match event {
+                    tauri::WindowEvent::Focused(focused) => {
+                        if !focused {
+                            // Hide the window when the user clicks outside
+                            let _ = window_clone.hide();
+                        }
+                    }
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        let _ = window_clone.hide();
+                    }
+                    _ => {}
+                });
             }
 
-            // V2 Tray Logic (non-panicking so window always stays alive)
+            // V2 Tray Logic: toggle visibility and force to absolute front on click
             let mut tray_builder = TrayIconBuilder::new();
             if let Some(icon) = app.default_window_icon() {
                 tray_builder = tray_builder.icon(icon.clone());
             }
             let _ = tray_builder
                 .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click { .. } = event {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
                         if let Some(window) = tray.app_handle().get_webview_window("main") {
                             if window.is_visible().unwrap_or(false) {
                                 let _ = window.hide();
                             } else {
+                                let _ = window.unminimize();
                                 let _ = window.show();
+                                let _ = window.set_always_on_top(true);
                                 let _ = window.set_focus();
                             }
                         }

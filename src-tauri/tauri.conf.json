@@ -18,7 +18,8 @@
         "width": 400,
         "height": 560,
         "title": "SoundFlow",
-        "center": true
+        "center": true,
+        "alwaysOnTop": true
       }
     ],
     "security": {
