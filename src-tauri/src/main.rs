@@ -6,11 +6,8 @@ mod audio_engine;
 mod com_policy;
 
 use std::sync::Mutex;
-use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, Runtime, WindowEvent,
-};
+use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+use tauri::Manager;
 
 #[cfg(target_os = "windows")]
 use audio_engine::{AppAudioSessionDto, AudioOutputDeviceDto, CoreAudioEngine};
@@ -130,81 +127,28 @@ fn set_default_audio_device(
     engine.set_default_audio_device(device_id)
 }
 
-fn position_flyout_near_tray<R: Runtime>(app: &AppHandle<R>, tray_rect: tauri::Rect) {
-    if let Some(window) = app.get_webview_window("main") {
-        if let Ok(win_size) = window.outer_size() {
-            let pos = match tray_rect.position {
-                tauri::Position::Physical(p) => p,
-                _ => tauri::PhysicalPosition::new(1480, 1020),
-            };
-            let x = (pos.x - (win_size.width as i32 / 2)).max(16);
-            let y = (pos.y - win_size.height as i32 - 12).max(16);
-            let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
-        }
-    }
-}
-
 fn main() {
     tauri::Builder::default()
         .manage(Mutex::new(CoreAudioEngine::new()))
         .setup(|app| {
-            let open_item = MenuItem::with_id(app, "open", "Open SoundFlow", true, None::<&str>)?;
-            let pause_item = MenuItem::with_id(app, "pause", "Pause Routing", true, None::<&str>)?;
-            let settings_item = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
-            let sep = PredefinedMenuItem::separator(app)?;
-            let exit_item = MenuItem::with_id(app, "exit", "Exit", true, None::<&str>)?;
+            // Force show the window immediately on startup
+            if let Some(window) = app.get_webview_window("main") {
+                window.show().unwrap();
+                window.set_focus().unwrap();
+            }
 
-            let tray_menu = Menu::with_items(
-                app,
-                &[&open_item, &pause_item, &settings_item, &sep, &exit_item],
-            )?;
-
-            let mut tray_builder = TrayIconBuilder::with_id("soundflow-tray")
-                .tooltip("SoundFlow — Windows Audio Controller")
-                .menu(&tray_menu)
-                .show_menu_on_left_click(false);
-
+            // V2 Tray Logic
+            let mut tray_builder = TrayIconBuilder::new();
             if let Some(icon) = app.default_window_icon() {
                 tray_builder = tray_builder.icon(icon.clone());
             }
-
-            let _tray = tray_builder
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "open" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.set_focus();
-                        }
-                    }
-                    "pause" => {
-                        let _ = app.emit("tray://toggle-pause", ());
-                    }
-                    "settings" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.set_focus();
-                            let _ = app.emit("tray://open-settings", ());
-                        }
-                    }
-                    "exit" => {
-                        app.exit(0);
-                    }
-                    _ => {}
-                })
+            tray_builder
                 .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        rect,
-                        ..
-                    } = event
-                    {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
+                    if let TrayIconEvent::Click { .. } = event {
+                        if let Some(window) = tray.app_handle().get_webview_window("main") {
                             if window.is_visible().unwrap_or(false) {
                                 let _ = window.hide();
                             } else {
-                                position_flyout_near_tray(app, rect);
                                 let _ = window.show();
                                 let _ = window.set_focus();
                             }
@@ -212,20 +156,6 @@ fn main() {
                     }
                 })
                 .build(app)?;
-
-            if let Some(main_win) = app.get_webview_window("main") {
-                let win_clone = main_win.clone();
-                main_win.on_window_event(move |event| match event {
-                    WindowEvent::Focused(false) => {
-                        let _ = win_clone.hide();
-                    }
-                    WindowEvent::CloseRequested { api, .. } => {
-                        api.prevent_close();
-                        let _ = win_clone.hide();
-                    }
-                    _ => {}
-                });
-            }
 
             Ok(())
         })
@@ -238,5 +168,5 @@ fn main() {
             set_default_audio_device
         ])
         .run(tauri::generate_context!())
-        .expect("error while running SoundFlow Tauri application");
+        .expect("error while running tauri application");
 }

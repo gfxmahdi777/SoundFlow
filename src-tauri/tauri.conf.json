@@ -14,16 +14,11 @@
     "windows": [
       {
         "label": "main",
-        "title": "SoundFlow",
+        "visible": true,
         "width": 400,
         "height": 560,
-        "decorations": false,
-        "transparent": true,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "visible": true,
-        "resizable": false,
-        "center": false
+        "title": "SoundFlow",
+        "center": true
       }
     ],
     "security": {

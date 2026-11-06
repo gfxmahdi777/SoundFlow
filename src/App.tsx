@@ -895,7 +895,7 @@ export default function App() {
   // If running inside the native 400x560 Tauri desktop window, render the popup directly
   if (isNativeTauri) {
     return (
-      <div className="w-screen h-screen overflow-hidden bg-transparent flex items-center justify-center">
+      <div className="w-screen h-screen overflow-hidden bg-[#F5F8FF] text-[#172033] flex items-center justify-center">
         <SoundFlowPopup
           isOpen={true}
           routingActive={config.routingActive}
