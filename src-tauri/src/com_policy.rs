@@ -1,3 +1,5 @@
+#![allow(non_snake_case, non_camel_case_types)]
+
 use std::ffi::c_void;
 use windows::core::{IUnknown, IUnknown_Vtbl, Interface, GUID, HRESULT, HSTRING, PCWSTR};
 use windows::Win32::Media::Audio::{eConsole, eMultimedia, eRender, EDataFlow, ERole};

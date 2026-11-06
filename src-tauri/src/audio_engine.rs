@@ -2,9 +2,9 @@ use crate::com_policy::PolicyConfigClient;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use windows::core::{Interface, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, PROPERTYKEY};
+use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::Media::Audio::{
-    eMultimedia, eRender, IAudioSessionControl2, IAudioSessionEnumerator, IAudioSessionManager2,
+    eMultimedia, eRender, IAudioSessionControl2, IAudioSessionManager2,
     IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator,
     DEVICE_STATE_ACTIVE,
 };
@@ -15,7 +15,7 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
-use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
+use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, PROPERTYKEY};
 
 /// PKEY_Device_FriendlyName: {a45c254e-df1c-4efd-8020-67d146a850e0}, 14
 const PKEY_DEVICE_FRIENDLY_NAME: PROPERTYKEY = PROPERTYKEY {
@@ -259,9 +259,7 @@ impl CoreAudioEngine {
                     if let Ok(manager2) =
                         device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None)
                     {
-                        if let Ok(session_enum: IAudioSessionEnumerator) =
-                            manager2.GetSessionEnumerator()
-                        {
+                        if let Ok(session_enum) = manager2.GetSessionEnumerator() {
                             let session_count = session_enum.GetCount().unwrap_or(0);
                             for s_idx in 0..session_count {
                                 if let Ok(control) = session_enum.GetSession(s_idx) {
