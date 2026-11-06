@@ -7,3 +7,6 @@ coverage/
 .env*
 !.env.example
 src-tauri/target/
+package-lock.json
+bun.lock
+

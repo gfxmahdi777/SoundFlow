@@ -33,16 +33,17 @@ jobs:
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Rust build cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: './src-tauri -> target'
+      - name: Clean any platform-specific lockfiles
+        shell: pwsh
+        run: |
+          if (Test-Path package-lock.json) { Remove-Item package-lock.json -Force }
+          if (Test-Path bun.lock) { Remove-Item bun.lock -Force }
 
       - name: Install frontend dependencies
-        run: npm install --legacy-peer-deps
+        run: npm install --no-package-lock --legacy-peer-deps
 
-      - name: Generate Tauri application icons
-        run: npx tauri icon public/app-icon.svg
+      - name: Build Frontend Assets
+        run: npm run build
 
       - name: Build Tauri 2 Windows Installer
         run: npx tauri build
