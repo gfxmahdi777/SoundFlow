@@ -16,6 +16,7 @@ import {
 import { soundFlowEngine } from './services/audioEngine';
 import {
   isTauriRuntime,
+  subscribeToTauriAudioMeters,
   subscribeToTauriTrayEvents,
   tauriGetAudioDevices,
   tauriGetAudioSessions,
@@ -248,7 +249,15 @@ const INITIAL_FALLBACK_CONFIG: SoundFlowConfig = {
 };
 
 export default function App() {
-  const [config, setConfig] = useState<SoundFlowConfig>(INITIAL_FALLBACK_CONFIG);
+  const isNativeTauri = isTauriRuntime();
+  const [config, setConfig] = useState<SoundFlowConfig>(() =>
+    isNativeTauri
+      ? {
+          ...INITIAL_FALLBACK_CONFIG,
+          apps: [],
+        }
+      : INITIAL_FALLBACK_CONFIG
+  );
   const [isPopupOpen, setIsPopupOpen] = useState<boolean>(true);
   const [isAdvancedSettingsOpen, setIsAdvancedSettingsOpen] = useState<boolean>(false);
   const [isCodeModalOpen, setIsCodeModalOpen] = useState<boolean>(false);
@@ -258,7 +267,6 @@ export default function App() {
   const [systemTime, setSystemTime] = useState<string>('');
   const [systemDate, setSystemDate] = useState<string>('');
   const [engineRunning, setEngineRunning] = useState<boolean>(true);
-  const isNativeTauri = isTauriRuntime();
 
   const [telemetry, setTelemetry] = useState<AudioTelemetryFrame>({
     appLevels: {},
@@ -311,31 +319,45 @@ export default function App() {
       tauriGetAudioSessions(),
     ]);
 
-    if (nativeDevices && nativeDevices.length > 0) {
-      const defaultDev = nativeDevices.find((d) => d.isDefault) || nativeDevices[0];
-      setConfig((prev) => ({
+    setConfig((prev) => {
+      const nextDevices =
+        nativeDevices && nativeDevices.length > 0 ? nativeDevices : prev.devices;
+      const defaultDev =
+        nextDevices.find((d) => d.isDefault) ||
+        nextDevices[0] || { id: prev.defaultDeviceId };
+      const nextApps =
+        nativeSessions !== null
+          ? nativeSessions.map((session) => ({
+              ...session,
+              name:
+                session.name && session.name.trim()
+                  ? session.name.trim()
+                  : 'Unknown App',
+            }))
+          : prev.apps;
+
+      return {
         ...prev,
         defaultDeviceId: defaultDev.id,
-        devices: nativeDevices,
-        apps: nativeSessions && nativeSessions.length > 0 ? nativeSessions : prev.apps,
-      }));
-      appendLog(
-        'system',
-        `Synchronized ${nativeDevices.length} Core Audio endpoints and ${
-          nativeSessions?.length ?? 0
-        } WASAPI sessions via Tauri IPC`
-      );
-    }
-  }, [appendLog]);
+        devices: nextDevices,
+        apps: nextApps,
+      };
+    });
+  }, []);
 
   // Load persisted config on mount (Tauri IPC in desktop runtime, Express API in web preview)
   useEffect(() => {
     let timerId: number | null = null;
+    let pollId: number | null = null;
     if (isTauriRuntime()) {
       // Allow the main window to paint its initial UI immediately before querying Windows Core Audio
       timerId = window.setTimeout(() => {
         void refreshFromTauriBackend();
-      }, 120);
+      }, 100);
+      // Periodically sync active audio sessions so newly playing or stopped apps update automatically
+      pollId = window.setInterval(() => {
+        void refreshFromTauriBackend();
+      }, 2500);
     } else {
       fetch('/api/config')
         .then((r) => (r.ok ? r.json() : null))
@@ -359,6 +381,9 @@ export default function App() {
     return () => {
       if (timerId !== null) {
         window.clearTimeout(timerId);
+      }
+      if (pollId !== null) {
+        window.clearInterval(pollId);
       }
     };
   }, [refreshFromTauriBackend]);
@@ -429,8 +454,68 @@ export default function App() {
     );
   }, [config.devices, config.apps, config.routingActive, config.defaultDeviceId, engineRunning]);
 
-  // Smooth, low-CPU telemetry loop (only updates React state while UI surfaces are visible)
+  // Subscribe to real-time 65ms Tauri WASAPI IAudioMeterInformation events ("audio_meter_update")
   useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let unlistenFn: (() => void) | null = null;
+    let active = true;
+
+    void subscribeToTauriAudioMeters((payload) => {
+      if (!active) return;
+      setTelemetry((prev) => {
+        const nextAppLevels: AudioTelemetryFrame['appLevels'] = {};
+        const nextDeviceLevels: AudioTelemetryFrame['deviceLevels'] = {};
+
+        for (const [pidKey, rawPeak] of Object.entries(payload.sessionPeaks || {})) {
+          const peak = Math.max(0, Math.min(1, Number(rawPeak) || 0));
+          const db = peak > 0.0001 ? Math.max(-60, 20 * Math.log10(peak)) : -60;
+          const appId = `app-${pidKey}`;
+          nextAppLevels[appId] = {
+            db,
+            peak,
+            waveform: [],
+            effectiveDeviceId: null,
+          };
+        }
+
+        for (const [devId, rawPeak] of Object.entries(payload.devicePeaks || {})) {
+          const peak = Math.max(0, Math.min(1, Number(rawPeak) || 0));
+          const db = peak > 0.0001 ? Math.max(-60, 20 * Math.log10(peak)) : -60;
+          nextDeviceLevels[devId] = {
+            db,
+            peak,
+            activeStreamCount: peak > 0.005 ? 1 : 0,
+          };
+        }
+
+        return {
+          ...prev,
+          appLevels: nextAppLevels,
+          deviceLevels: nextDeviceLevels,
+          audioContextState: 'running',
+        };
+      });
+    }).then((unlisten) => {
+      if (active && unlisten) {
+        unlistenFn = unlisten;
+      } else if (unlisten) {
+        unlisten();
+      }
+    });
+
+    return () => {
+      active = false;
+      if (unlistenFn) {
+        unlistenFn();
+      }
+    };
+  }, []);
+
+  // Smooth, low-CPU Web Audio telemetry loop (used in browser preview when not in native Tauri)
+  useEffect(() => {
+    if (isTauriRuntime()) {
+      return;
+    }
     if (!engineRunning || (!isPopupOpen && !isAdvancedSettingsOpen)) {
       return;
     }
@@ -440,7 +525,7 @@ export default function App() {
     };
     updateTelemetry();
 
-    const intervalId = window.setInterval(updateTelemetry, 140);
+    const intervalId = window.setInterval(updateTelemetry, 75);
     return () => window.clearInterval(intervalId);
   }, [engineRunning, isPopupOpen, isAdvancedSettingsOpen]);
 

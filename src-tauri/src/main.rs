@@ -7,15 +7,32 @@ mod com_policy;
 
 use std::sync::Mutex;
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[cfg(target_os = "windows")]
 use audio_engine::{
-    ensure_com_initialized, AppAudioSessionDto, AudioOutputDeviceDto, CoreAudioEngine,
+    ensure_com_initialized, sample_audio_meters_snapshot, AppAudioSessionDto,
+    AudioOutputDeviceDto, CoreAudioEngine,
 };
 
 #[cfg(not(target_os = "windows"))]
 fn ensure_com_initialized() {}
+
+#[cfg(not(target_os = "windows"))]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioMeterUpdatePayload {
+    pub session_peaks: std::collections::HashMap<u32, f32>,
+    pub device_peaks: std::collections::HashMap<String, f32>,
+}
+
+#[cfg(not(target_os = "windows"))]
+fn sample_audio_meters_snapshot() -> AudioMeterUpdatePayload {
+    AudioMeterUpdatePayload {
+        session_peaks: std::collections::HashMap::new(),
+        device_peaks: std::collections::HashMap::new(),
+    }
+}
 
 #[cfg(not(target_os = "windows"))]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -189,6 +206,17 @@ fn main() {
                     }
                 })
                 .build(app);
+
+            // Spawn background 65ms real-time audio metering thread emitting "audio_meter_update"
+            let meter_app_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                ensure_com_initialized();
+                loop {
+                    let payload = sample_audio_meters_snapshot();
+                    let _ = meter_app_handle.emit("audio_meter_update", payload);
+                    std::thread::sleep(std::time::Duration::from_millis(65));
+                }
+            });
 
             Ok(())
         })

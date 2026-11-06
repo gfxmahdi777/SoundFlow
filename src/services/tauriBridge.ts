@@ -2,6 +2,11 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { AppAudioSession, AudioOutputDevice } from '../types/soundflow';
 
+export interface AudioMeterUpdatePayload {
+  sessionPeaks: Record<string, number>;
+  devicePeaks: Record<string, number>;
+}
+
 /**
  * Detects whether SoundFlow is currently running inside the native Tauri 2 Windows runtime.
  */
@@ -116,6 +121,25 @@ export async function tauriSetDefaultAudioDevice(
   } catch (err) {
     console.warn('Tauri set_default_audio_device error:', err);
     return false;
+  }
+}
+
+/**
+ * Subscribes to real-time 65ms `audio_meter_update` events emitted by the Rust Core Audio background thread.
+ */
+export async function subscribeToTauriAudioMeters(
+  onUpdate: (payload: AudioMeterUpdatePayload) => void
+): Promise<UnlistenFn | null> {
+  if (!isTauriRuntime()) return null;
+  try {
+    return await listen<AudioMeterUpdatePayload>('audio_meter_update', (event) => {
+      if (event && event.payload) {
+        onUpdate(event.payload);
+      }
+    });
+  } catch (err) {
+    console.warn('Failed to subscribe to audio_meter_update:', err);
+    return null;
   }
 }
 
