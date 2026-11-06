@@ -10,7 +10,12 @@ use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
 
 #[cfg(target_os = "windows")]
-use audio_engine::{AppAudioSessionDto, AudioOutputDeviceDto, CoreAudioEngine};
+use audio_engine::{
+    ensure_com_initialized, AppAudioSessionDto, AudioOutputDeviceDto, CoreAudioEngine,
+};
+
+#[cfg(not(target_os = "windows"))]
+fn ensure_com_initialized() {}
 
 #[cfg(not(target_os = "windows"))]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -73,76 +78,104 @@ impl CoreAudioEngine {
 }
 
 #[tauri::command]
-fn get_audio_devices(
+async fn get_audio_devices(
     state: tauri::State<'_, Mutex<CoreAudioEngine>>,
 ) -> Result<Vec<AudioOutputDeviceDto>, String> {
-    let engine = state.lock().map_err(|e| e.to_string())?;
-    engine.get_audio_devices()
+    ensure_com_initialized();
+    let engine = match state.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    Ok(engine.get_audio_devices().unwrap_or_default())
 }
 
 #[tauri::command]
-fn get_audio_sessions(
+async fn get_audio_sessions(
     state: tauri::State<'_, Mutex<CoreAudioEngine>>,
 ) -> Result<Vec<AppAudioSessionDto>, String> {
-    let engine = state.lock().map_err(|e| e.to_string())?;
-    engine.get_audio_sessions()
+    ensure_com_initialized();
+    let engine = match state.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    Ok(engine.get_audio_sessions().unwrap_or_default())
 }
 
 #[tauri::command]
-fn set_app_audio_device(
+async fn set_app_audio_device(
     state: tauri::State<'_, Mutex<CoreAudioEngine>>,
     pid: u32,
     device_id: String,
 ) -> Result<(), String> {
-    let mut engine = state.lock().map_err(|e| e.to_string())?;
-    engine.set_app_audio_device(pid, device_id)
+    ensure_com_initialized();
+    let mut engine = match state.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let _ = engine.set_app_audio_device(pid, device_id);
+    Ok(())
 }
 
 #[tauri::command]
-fn set_app_volume(
+async fn set_app_volume(
     state: tauri::State<'_, Mutex<CoreAudioEngine>>,
     pid: u32,
     volume: f32,
 ) -> Result<(), String> {
-    let engine = state.lock().map_err(|e| e.to_string())?;
-    engine.set_app_volume(pid, volume)
+    ensure_com_initialized();
+    let engine = match state.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let _ = engine.set_app_volume(pid, volume);
+    Ok(())
 }
 
 #[tauri::command]
-fn set_app_mute(
+async fn set_app_mute(
     state: tauri::State<'_, Mutex<CoreAudioEngine>>,
     pid: u32,
     muted: bool,
 ) -> Result<(), String> {
-    let engine = state.lock().map_err(|e| e.to_string())?;
-    engine.set_app_mute(pid, muted)
+    ensure_com_initialized();
+    let engine = match state.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let _ = engine.set_app_mute(pid, muted);
+    Ok(())
 }
 
 #[tauri::command]
-fn set_default_audio_device(
+async fn set_default_audio_device(
     state: tauri::State<'_, Mutex<CoreAudioEngine>>,
     device_id: String,
 ) -> Result<(), String> {
-    let engine = state.lock().map_err(|e| e.to_string())?;
-    engine.set_default_audio_device(device_id)
+    ensure_com_initialized();
+    let engine = match state.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let _ = engine.set_default_audio_device(device_id);
+    Ok(())
 }
 
 fn main() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .manage(Mutex::new(CoreAudioEngine::new()))
         .setup(|app| {
-            // Force show the window immediately on startup
+            // Force show the window immediately on startup (without .unwrap() panics)
             if let Some(window) = app.get_webview_window("main") {
-                window.show().unwrap();
-                window.set_focus().unwrap();
+                let _ = window.show();
+                let _ = window.set_focus();
             }
 
-            // V2 Tray Logic
+            // V2 Tray Logic (non-panicking so window always stays alive)
             let mut tray_builder = TrayIconBuilder::new();
             if let Some(icon) = app.default_window_icon() {
                 tray_builder = tray_builder.icon(icon.clone());
             }
-            tray_builder
+            let _ = tray_builder
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click { .. } = event {
                         if let Some(window) = tray.app_handle().get_webview_window("main") {
@@ -155,7 +188,7 @@ fn main() {
                         }
                     }
                 })
-                .build(app)?;
+                .build(app);
 
             Ok(())
         })
@@ -166,7 +199,9 @@ fn main() {
             set_app_volume,
             set_app_mute,
             set_default_audio_device
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        ]);
+
+    if let Err(err) = builder.run(tauri::generate_context!()) {
+        eprintln!("SoundFlow runtime error: {err}");
+    }
 }

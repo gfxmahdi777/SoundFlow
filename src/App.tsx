@@ -330,8 +330,12 @@ export default function App() {
 
   // Load persisted config on mount (Tauri IPC in desktop runtime, Express API in web preview)
   useEffect(() => {
+    let timerId: number | null = null;
     if (isTauriRuntime()) {
-      void refreshFromTauriBackend();
+      // Allow the main window to paint its initial UI immediately before querying Windows Core Audio
+      timerId = window.setTimeout(() => {
+        void refreshFromTauriBackend();
+      }, 120);
     } else {
       fetch('/api/config')
         .then((r) => (r.ok ? r.json() : null))
@@ -351,6 +355,12 @@ export default function App() {
     void soundFlowEngine.enumeratePhysicalSinks().then((sinks) => {
       setPhysicalSinks(sinks);
     });
+
+    return () => {
+      if (timerId !== null) {
+        window.clearTimeout(timerId);
+      }
+    };
   }, [refreshFromTauriBackend]);
 
   // Subscribe to native Tauri System Tray events

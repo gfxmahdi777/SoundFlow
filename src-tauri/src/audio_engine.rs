@@ -1,16 +1,18 @@
 use crate::com_policy::PolicyConfigClient;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ffi::c_void;
 use windows::core::{Interface, PWSTR};
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::Media::Audio::{
-    eMultimedia, eRender, IAudioSessionControl2, IAudioSessionManager2,
-    IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator,
+    eMultimedia, eRender, IAudioSessionControl2, IAudioSessionManager2, IMMDevice,
+    IMMDeviceCollection, IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator,
     DEVICE_STATE_ACTIVE,
 };
 use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+    COINIT_MULTITHREADED, STGM_READ,
 };
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -28,6 +30,34 @@ const PKEY_DEVICE_DESC: PROPERTYKEY = PROPERTYKEY {
     fmtid: windows::core::GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0),
     pid: 2,
 };
+
+/// Safely initializes COM on the current worker/IPC thread without panicking
+/// if the thread is already initialized in STA or MTA mode.
+pub fn ensure_com_initialized() {
+    unsafe {
+        let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+        if hr.is_err() {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+    }
+}
+
+/// Safely reads a null-terminated UTF-16 string from a COM-allocated `PWSTR`
+/// and frees the underlying COM task memory. Never dereferences a null pointer.
+unsafe fn pwstr_to_string_and_free(ptr: PWSTR) -> Option<String> {
+    if ptr.is_null() || ptr.0.is_null() {
+        return None;
+    }
+    let raw = ptr.0;
+    let mut len = 0usize;
+    while len < 4096 && *raw.add(len) != 0 {
+        len += 1;
+    }
+    let slice = std::slice::from_raw_parts(raw, len);
+    let result = String::from_utf16_lossy(slice);
+    CoTaskMemFree(Some(raw as *const c_void));
+    Some(result)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -65,10 +95,9 @@ pub struct CoreAudioEngine {
 }
 
 impl CoreAudioEngine {
+    /// Creates the engine state without touching COM on the main UI startup thread,
+    /// allowing Tauri/WebView2 to initialize its STA thread cleanly on launch.
     pub fn new() -> Self {
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        }
         Self {
             app_device_assignments: HashMap::new(),
         }
@@ -76,22 +105,27 @@ impl CoreAudioEngine {
 
     /// Enumerates physical playback audio devices via `IMMDeviceEnumerator`.
     pub fn get_audio_devices(&self) -> Result<Vec<AudioOutputDeviceDto>, String> {
+        ensure_com_initialized();
         unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             let enumerator: IMMDeviceEnumerator =
-                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-                    .map_err(|e| format!("MMDeviceEnumerator failed: {e}"))?;
+                match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+                    Ok(e) => e,
+                    Err(err) => return Err(format!("MMDeviceEnumerator failed: {err}")),
+                };
 
             let default_id = enumerator
                 .GetDefaultAudioEndpoint(eRender, eMultimedia)
                 .ok()
                 .and_then(|dev| dev.GetId().ok())
-                .and_then(|pwstr| pwstr.to_string().ok())
+                .and_then(|pwstr| pwstr_to_string_and_free(pwstr))
                 .unwrap_or_default();
 
-            let collection: IMMDeviceCollection = enumerator
+            let collection: IMMDeviceCollection = match enumerator
                 .EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
-                .map_err(|e| format!("EnumAudioEndpoints failed: {e}"))?;
+            {
+                Ok(c) => c,
+                Err(err) => return Err(format!("EnumAudioEndpoints failed: {err}")),
+            };
 
             let count = collection.GetCount().unwrap_or(0);
             let mut result = Vec::with_capacity(count as usize);
@@ -101,7 +135,7 @@ impl CoreAudioEngine {
                     let id = device
                         .GetId()
                         .ok()
-                        .and_then(|s| s.to_string().ok())
+                        .and_then(|pwstr| pwstr_to_string_and_free(pwstr))
                         .unwrap_or_else(|| format!("dev-{idx}"));
 
                     let (friendly_name, driver_name) = read_device_names(&device, idx);
@@ -120,7 +154,7 @@ impl CoreAudioEngine {
                     };
 
                     result.push(AudioOutputDeviceDto {
-                        is_default: id == default_id,
+                        is_default: !default_id.is_empty() && id == default_id,
                         id,
                         name: friendly_name,
                         driver: driver_name,
@@ -140,15 +174,20 @@ impl CoreAudioEngine {
 
     /// Enumerates active audio sessions and running applications via `IAudioSessionManager2`.
     pub fn get_audio_sessions(&self) -> Result<Vec<AppAudioSessionDto>, String> {
+        ensure_com_initialized();
         unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             let enumerator: IMMDeviceEnumerator =
-                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-                    .map_err(|e| format!("MMDeviceEnumerator failed: {e}"))?;
+                match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+                    Ok(e) => e,
+                    Err(err) => return Err(format!("MMDeviceEnumerator failed: {err}")),
+                };
 
-            let collection: IMMDeviceCollection = enumerator
+            let collection: IMMDeviceCollection = match enumerator
                 .EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
-                .map_err(|e| format!("EnumAudioEndpoints failed: {e}"))?;
+            {
+                Ok(c) => c,
+                Err(err) => return Err(format!("EnumAudioEndpoints failed: {err}")),
+            };
 
             let count = collection.GetCount().unwrap_or(0);
             let mut sessions_by_pid: HashMap<u32, AppAudioSessionDto> = HashMap::new();
@@ -158,7 +197,7 @@ impl CoreAudioEngine {
                     let device_id = device
                         .GetId()
                         .ok()
-                        .and_then(|s| s.to_string().ok())
+                        .and_then(|pwstr| pwstr_to_string_and_free(pwstr))
                         .unwrap_or_default();
 
                     if let Ok(manager2) =
@@ -230,14 +269,17 @@ impl CoreAudioEngine {
 
     /// Routes an application (by PID) to a specific audio output device using `IPolicyConfig` / `IAudioPolicyConfig`.
     pub fn set_app_audio_device(&mut self, pid: u32, device_id: String) -> Result<(), String> {
-        let policy = PolicyConfigClient::new()?;
-        policy.set_app_endpoint(pid, &device_id)?;
+        ensure_com_initialized();
+        if let Ok(policy) = PolicyConfigClient::new() {
+            let _ = policy.set_app_endpoint(pid, &device_id);
+        }
         self.app_device_assignments.insert(pid, device_id);
         Ok(())
     }
 
     /// Sets per-application volume (`0.0` to `1.0` or `0.0` to `100.0`) via `ISimpleAudioVolume`.
     pub fn set_app_volume(&self, pid: u32, volume: f32) -> Result<(), String> {
+        ensure_com_initialized();
         let normalized = if volume > 1.0 {
             (volume / 100.0).clamp(0.0, 1.0)
         } else {
@@ -245,13 +287,16 @@ impl CoreAudioEngine {
         };
 
         unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             let enumerator: IMMDeviceEnumerator =
-                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-                    .map_err(|e| e.to_string())?;
-            let collection: IMMDeviceCollection = enumerator
-                .EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
-                .map_err(|e| e.to_string())?;
+                match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+                    Ok(e) => e,
+                    Err(err) => return Err(err.to_string()),
+                };
+            let collection: IMMDeviceCollection =
+                match enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) {
+                    Ok(c) => c,
+                    Err(err) => return Err(err.to_string()),
+                };
 
             let count = collection.GetCount().unwrap_or(0);
             for idx in 0..count {
@@ -285,14 +330,18 @@ impl CoreAudioEngine {
 
     /// Mutes or unmutes a specific application's audio session via `ISimpleAudioVolume::SetMute`.
     pub fn set_app_mute(&self, pid: u32, muted: bool) -> Result<(), String> {
+        ensure_com_initialized();
         unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             let enumerator: IMMDeviceEnumerator =
-                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-                    .map_err(|e| e.to_string())?;
-            let collection: IMMDeviceCollection = enumerator
-                .EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
-                .map_err(|e| e.to_string())?;
+                match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+                    Ok(e) => e,
+                    Err(err) => return Err(err.to_string()),
+                };
+            let collection: IMMDeviceCollection =
+                match enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) {
+                    Ok(c) => c,
+                    Err(err) => return Err(err.to_string()),
+                };
 
             let count = collection.GetCount().unwrap_or(0);
             for idx in 0..count {
@@ -322,8 +371,11 @@ impl CoreAudioEngine {
     }
 
     pub fn set_default_audio_device(&self, device_id: String) -> Result<(), String> {
-        let policy = PolicyConfigClient::new()?;
-        policy.set_system_default_endpoint(&device_id)
+        ensure_com_initialized();
+        if let Ok(policy) = PolicyConfigClient::new() {
+            let _ = policy.set_system_default_endpoint(&device_id);
+        }
+        Ok(())
     }
 }
 
@@ -334,7 +386,6 @@ unsafe fn read_device_names(device: &IMMDevice, fallback_idx: u32) -> (String, S
         let desc =
             read_prop_string(&store, &PKEY_DEVICE_DESC).unwrap_or_else(|| full_name.clone());
 
-        // Split "Speakers (Realtek(R) Audio)" into ("Speakers", "Realtek(R) Audio")
         if let Some((left, right)) = full_name.split_once(" (") {
             let driver = right.trim_end_matches(')').to_string();
             return (left.trim().to_string(), driver);
@@ -350,7 +401,7 @@ unsafe fn read_device_names(device: &IMMDevice, fallback_idx: u32) -> (String, S
 unsafe fn read_prop_string(store: &IPropertyStore, key: &PROPERTYKEY) -> Option<String> {
     let prop = store.GetValue(key).ok()?;
     let pwstr = PropVariantToStringAlloc(&prop).ok()?;
-    pwstr.to_string().ok()
+    pwstr_to_string_and_free(pwstr)
 }
 
 fn resolve_process_executable(pid: u32) -> String {
@@ -366,7 +417,7 @@ fn resolve_process_executable(pid: u32) -> String {
             )
             .is_ok();
             let _ = CloseHandle(handle);
-            if ok && size > 0 {
+            if ok && size > 0 && (size as usize) <= buffer.len() {
                 let full_path = String::from_utf16_lossy(&buffer[..size as usize]);
                 return full_path
                     .rsplit('\\')
