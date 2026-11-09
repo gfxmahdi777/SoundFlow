@@ -24,6 +24,8 @@ import {
   tauriSetAppMute,
   tauriSetAppVolume,
   tauriSetDefaultAudioDevice,
+  tauriSetDeviceMute,
+  tauriSetDeviceVolume,
 } from './services/tauriBridge';
 import { SoundFlowPopup } from './components/SoundFlowPopup';
 import {
@@ -710,6 +712,64 @@ export default function App() {
     [ensureAudioEngineReady, appendLog, schedulePersist]
   );
 
+  const handleChangeDeviceVolume = useCallback(
+    (deviceId: string, volume: number) => {
+      ensureAudioEngineReady();
+      const clamped = Math.max(0, Math.min(100, volume));
+      const isMuted = clamped === 0;
+
+      // Fast direct Web Audio gain update for 0ms response in browser preview
+      soundFlowEngine.setDeviceVolumeFast(deviceId, clamped, isMuted);
+
+      // Invoke Tauri 2 Rust Core Audio command (`set_device_volume`) when in native runtime
+      void tauriSetDeviceVolume(deviceId, clamped);
+
+      setConfig((prev) => {
+        const updatedDevices = prev.devices.map((d) =>
+          d.id === deviceId ? { ...d, masterVolume: clamped, muted: isMuted } : d
+        );
+        const next = {
+          ...prev,
+          devices: updatedDevices,
+        };
+        schedulePersist(next);
+        return next;
+      });
+    },
+    [ensureAudioEngineReady, schedulePersist]
+  );
+
+  const handleToggleDeviceMute = useCallback(
+    (deviceId: string) => {
+      ensureAudioEngineReady();
+      setConfig((prev) => {
+        const targetDev = prev.devices.find((d) => d.id === deviceId);
+        if (!targetDev) return prev;
+        const nextMuted = !targetDev.muted;
+
+        soundFlowEngine.setDeviceVolumeFast(deviceId, targetDev.masterVolume, nextMuted);
+        void tauriSetDeviceMute(deviceId, nextMuted);
+
+        const updatedDevices = prev.devices.map((d) =>
+          d.id === deviceId ? { ...d, muted: nextMuted } : d
+        );
+
+        appendLog(
+          'system',
+          `${nextMuted ? 'Muted' : 'Unmuted'} device ${targetDev.name} (${targetDev.driver})`
+        );
+
+        const next = {
+          ...prev,
+          devices: updatedDevices,
+        };
+        schedulePersist(next);
+        return next;
+      });
+    },
+    [ensureAudioEngineReady, appendLog, schedulePersist]
+  );
+
   const handleToggleDeviceConnection = useCallback(
     (deviceId: string) => {
       ensureAudioEngineReady();
@@ -1000,6 +1060,8 @@ export default function App() {
           devices={config.devices}
           defaultDeviceId={config.defaultDeviceId}
           onSelectDefaultDevice={handleSelectDefaultDevice}
+          onChangeDeviceVolume={handleChangeDeviceVolume}
+          onToggleDeviceMute={handleToggleDeviceMute}
           apps={config.apps}
           onAssignAppDevice={handleAssignAppDevice}
           onChangeAppVolume={handleChangeAppVolume}
@@ -1104,6 +1166,8 @@ export default function App() {
             devices={config.devices}
             defaultDeviceId={config.defaultDeviceId}
             onSelectDefaultDevice={handleSelectDefaultDevice}
+            onChangeDeviceVolume={handleChangeDeviceVolume}
+            onToggleDeviceMute={handleToggleDeviceMute}
             apps={config.apps}
             onAssignAppDevice={handleAssignAppDevice}
             onChangeAppVolume={handleChangeAppVolume}

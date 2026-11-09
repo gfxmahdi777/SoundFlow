@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use windows::core::{Interface, PCWSTR, PWSTR};
 use windows::Win32::Foundation::CloseHandle;
-use windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;
+use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolume, IAudioMeterInformation};
 use windows::Win32::Media::Audio::{
     eMultimedia, eRender, AudioSessionStateActive, IAudioSessionControl, IAudioSessionControl2,
     IAudioSessionManager2, IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator,
@@ -268,6 +268,19 @@ impl CoreAudioEngine {
                         "speakers"
                     };
 
+                    let mut master_volume: u32 = 100;
+                    let mut muted: bool = false;
+                    if let Ok(endpoint_vol) =
+                        device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
+                    {
+                        if let Ok(vol_scalar) = endpoint_vol.GetMasterVolumeLevelScalar() {
+                            master_volume = (vol_scalar.clamp(0.0, 1.0) * 100.0).round() as u32;
+                        }
+                        if let Ok(m) = endpoint_vol.GetMute() {
+                            muted = m.as_bool();
+                        }
+                    }
+
                     result.push(AudioOutputDeviceDto {
                         is_default: !default_id.is_empty() && id == default_id,
                         id,
@@ -277,8 +290,8 @@ impl CoreAudioEngine {
                         form_factor: form_factor.to_string(),
                         sample_rate: "48.0 kHz".to_string(),
                         bit_depth: "24-bit".to_string(),
-                        master_volume: 100,
-                        muted: false,
+                        master_volume,
+                        muted,
                     });
                 }
             }
@@ -512,6 +525,106 @@ impl CoreAudioEngine {
         ensure_com_initialized();
         if let Ok(policy) = PolicyConfigClient::new() {
             let _ = policy.set_system_default_endpoint(&device_id);
+        }
+        Ok(())
+    }
+
+    /// Sets master volume (`0.0` to `1.0` or `0.0` to `100.0`) for a physical audio endpoint via `IAudioEndpointVolume`.
+    pub fn set_device_volume(&self, device_id: String, volume: f32) -> Result<(), String> {
+        ensure_com_initialized();
+        let normalized = if volume > 1.0 {
+            (volume / 100.0).clamp(0.0, 1.0)
+        } else {
+            volume.clamp(0.0, 1.0)
+        };
+
+        unsafe {
+            let enumerator: IMMDeviceEnumerator =
+                match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+                    Ok(e) => e,
+                    Err(err) => return Err(format!("MMDeviceEnumerator failed: {err}")),
+                };
+
+            let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
+            let pcwstr = PCWSTR(wide.as_ptr());
+            let device = match enumerator.GetDevice(pcwstr) {
+                Ok(dev) => dev,
+                Err(_) => {
+                    let collection = enumerator
+                        .EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
+                        .map_err(|e| format!("EnumAudioEndpoints failed: {e}"))?;
+                    let count = collection.GetCount().unwrap_or(0);
+                    let mut found: Option<IMMDevice> = None;
+                    for idx in 0..count {
+                        if let Ok(dev) = collection.Item(idx) {
+                            if let Ok(id_pwstr) = dev.GetId() {
+                                if let Some(id_str) = pwstr_to_string_and_free(id_pwstr) {
+                                    if id_str == device_id {
+                                        found = Some(dev);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    found.ok_or_else(|| format!("Device not found: {device_id}"))?
+                }
+            };
+
+            let endpoint_vol: IAudioEndpointVolume = device
+                .Activate(CLSCTX_ALL, None)
+                .map_err(|e| format!("Activate IAudioEndpointVolume failed: {e}"))?;
+
+            endpoint_vol
+                .SetMasterVolumeLevelScalar(normalized, std::ptr::null())
+                .map_err(|e| format!("SetMasterVolumeLevelScalar failed: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Mutes or unmutes a physical audio endpoint via `IAudioEndpointVolume::SetMute`.
+    pub fn set_device_mute(&self, device_id: String, muted: bool) -> Result<(), String> {
+        ensure_com_initialized();
+        unsafe {
+            let enumerator: IMMDeviceEnumerator =
+                match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+                    Ok(e) => e,
+                    Err(err) => return Err(format!("MMDeviceEnumerator failed: {err}")),
+                };
+
+            let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
+            let pcwstr = PCWSTR(wide.as_ptr());
+            let device = match enumerator.GetDevice(pcwstr) {
+                Ok(dev) => dev,
+                Err(_) => {
+                    let collection = enumerator
+                        .EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
+                        .map_err(|e| format!("EnumAudioEndpoints failed: {e}"))?;
+                    let count = collection.GetCount().unwrap_or(0);
+                    let mut found: Option<IMMDevice> = None;
+                    for idx in 0..count {
+                        if let Ok(dev) = collection.Item(idx) {
+                            if let Ok(id_pwstr) = dev.GetId() {
+                                if let Some(id_str) = pwstr_to_string_and_free(id_pwstr) {
+                                    if id_str == device_id {
+                                        found = Some(dev);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    found.ok_or_else(|| format!("Device not found: {device_id}"))?
+                }
+            };
+
+            let endpoint_vol: IAudioEndpointVolume = device
+                .Activate(CLSCTX_ALL, None)
+                .map_err(|e| format!("Activate IAudioEndpointVolume failed: {e}"))?;
+
+            endpoint_vol
+                .SetMute(muted, std::ptr::null())
+                .map_err(|e| format!("SetMute failed: {e}"))?;
         }
         Ok(())
     }

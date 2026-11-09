@@ -117,6 +117,27 @@ export class SoundFlowAudioEngine {
     node.volumeGain.gain.setTargetAtTime(volTarget, now, 0.012);
   }
 
+  /**
+   * Zero-latency direct master gain update for smooth device volume slider dragging
+   */
+  public setDeviceVolumeFast(deviceId: string, volume: number, muted: boolean): void {
+    const targetDev = this.currentDevices.find((d) => d.id === deviceId);
+    if (targetDev) {
+      targetDev.masterVolume = volume;
+      targetDev.muted = muted;
+    }
+
+    if (!this.ctx) return;
+    const bus = this.deviceBuses.get(deviceId);
+    if (!bus) return;
+
+    const now = this.ctx.currentTime;
+    const isConnected = targetDev ? targetDev.status === 'connected' : true;
+    const targetGain = isConnected && !muted ? Math.max(0, Math.min(100, volume)) / 100 : 0;
+    bus.deviceVolumeGain.gain.cancelScheduledValues(now);
+    bus.deviceVolumeGain.gain.setTargetAtTime(targetGain, now, 0.012);
+  }
+
   public async enumeratePhysicalSinks(): Promise<MediaDeviceInfo[]> {
     if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
       return [];

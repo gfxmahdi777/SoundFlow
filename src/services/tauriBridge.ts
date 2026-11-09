@@ -125,6 +125,46 @@ export async function tauriSetDefaultAudioDevice(
 }
 
 /**
+ * Sets master volume (`0` to `100`) for a physical audio endpoint via `IAudioEndpointVolume::SetMasterVolumeLevelScalar`.
+ */
+export async function tauriSetDeviceVolume(
+  deviceId: string,
+  volume: number
+): Promise<boolean> {
+  if (!isTauriRuntime()) return false;
+  try {
+    await invoke('set_device_volume', {
+      deviceId,
+      volume: volume / 100,
+    });
+    return true;
+  } catch (err) {
+    console.warn('Tauri set_device_volume error:', err);
+    return false;
+  }
+}
+
+/**
+ * Mutes or unmutes a physical audio endpoint via `IAudioEndpointVolume::SetMute`.
+ */
+export async function tauriSetDeviceMute(
+  deviceId: string,
+  muted: boolean
+): Promise<boolean> {
+  if (!isTauriRuntime()) return false;
+  try {
+    await invoke('set_device_mute', {
+      deviceId,
+      muted,
+    });
+    return true;
+  } catch (err) {
+    console.warn('Tauri set_device_mute error:', err);
+    return false;
+  }
+}
+
+/**
  * Subscribes to real-time 65ms `audio_meter_update` events emitted by the Rust Core Audio background thread.
  */
 export async function subscribeToTauriAudioMeters(

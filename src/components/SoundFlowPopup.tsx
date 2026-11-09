@@ -28,6 +28,8 @@ interface SoundFlowPopupProps {
   devices: AudioOutputDevice[];
   defaultDeviceId: string;
   onSelectDefaultDevice: (deviceId: string) => void;
+  onChangeDeviceVolume: (deviceId: string, volume: number) => void;
+  onToggleDeviceMute: (deviceId: string) => void;
   apps: AppAudioSession[];
   onAssignAppDevice: (appId: string, targetDeviceId: string) => void;
   onChangeAppVolume: (appId: string, volume: number) => void;
@@ -59,6 +61,8 @@ export const SoundFlowPopup: React.FC<SoundFlowPopupProps> = React.memo(
     devices,
     defaultDeviceId,
     onSelectDefaultDevice,
+    onChangeDeviceVolume,
+    onToggleDeviceMute,
     apps,
     onAssignAppDevice,
     onChangeAppVolume,
@@ -241,6 +245,7 @@ export const SoundFlowPopup: React.FC<SoundFlowPopupProps> = React.memo(
           <div className="space-y-1.5">
             {connectedDevices.map((device) => {
               const isDefault = device.id === defaultDeviceId;
+              const masterVol = device.masterVolume ?? 100;
               const devLevel = telemetry.deviceLevels[device.id] || {
                 db: -60,
                 peak: 0,
@@ -251,59 +256,141 @@ export const SoundFlowPopup: React.FC<SoundFlowPopupProps> = React.memo(
                   ? Math.max(0, Math.min(1, devLevel.peak || 0))
                   : 0;
               const isMeterActive = rawPeak > 0.005;
-              const meterPct = isMeterActive ? Math.min(100, Math.round(rawPeak * 100)) : 0;
+              const sliderOverlayPct = isMeterActive
+                ? Math.min(masterVol, Math.round(rawPeak * masterVol))
+                : 0;
 
               return (
                 <div
                   key={device.id}
-                  onClick={() => onSelectDefaultDevice(device.id)}
-                  title="Click to set as Default Output"
                   style={{
                     backgroundColor: isDefault
-                      ? 'rgba(255, 255, 255, 0.85)'
+                      ? 'rgba(255, 255, 255, 0.88)'
                       : 'rgba(255, 255, 255, 0.65)',
                     borderColor: isDefault
                       ? 'rgba(52, 120, 246, 0.45)'
                       : 'rgba(255, 255, 255, 0.85)',
                   }}
-                  className="relative overflow-hidden px-3 py-1.5 rounded-[14px] border shadow-[0_2px_8px_rgba(23,32,51,0.04)] hover:bg-white/90 transition-all cursor-pointer flex items-center justify-between gap-2"
+                  className="relative overflow-hidden px-3 py-2 rounded-[14px] border shadow-[0_2px_8px_rgba(23,32,51,0.04)] hover:bg-white/90 transition-all flex flex-col gap-1.5"
                 >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <div
-                      className={`w-6 h-6 rounded-[8px] flex items-center justify-center shrink-0 transition-colors ${
-                        isDefault
-                          ? 'bg-[#3478F6]/12 text-[#3478F6]'
-                          : 'bg-[#F5F8FF] text-[#758198]'
-                      }`}
-                    >
-                      <DeviceEndpointIcon
-                        formFactor={device.formFactor}
-                        className="w-3.5 h-3.5"
-                      />
+                  {/* Top Row: Device Info + Default Selection Trigger */}
+                  <div
+                    onClick={() => onSelectDefaultDevice(device.id)}
+                    title="Click to set as Windows Default Audio Output"
+                    className="flex items-center justify-between gap-2 cursor-pointer select-none"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <div
+                        className={`w-6 h-6 rounded-[8px] flex items-center justify-center shrink-0 transition-colors ${
+                          isDefault
+                            ? 'bg-[#3478F6]/12 text-[#3478F6]'
+                            : 'bg-[#F5F8FF] text-[#758198]'
+                        }`}
+                      >
+                        <DeviceEndpointIcon
+                          formFactor={device.formFactor}
+                          className="w-3.5 h-3.5"
+                        />
+                      </div>
+                      <div className="text-[12px] truncate">
+                        <span className="font-semibold text-[#172033]">{device.name}</span>
+                        <span className="text-[#758198] mx-1.5">—</span>
+                        <span className="text-[#758198]">{device.driver}</span>
+                      </div>
                     </div>
-                    <div className="text-[12px] truncate">
-                      <span className="font-semibold text-[#172033]">{device.name}</span>
-                      <span className="text-[#758198] mx-1.5">—</span>
-                      <span className="text-[#758198]">{device.driver}</span>
+
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {isDefault ? (
+                        <span className="px-1.5 py-0.5 rounded-[6px] bg-[#3478F6]/12 text-[#3478F6] text-[10px] font-semibold tracking-tight">
+                          Default
+                        </span>
+                      ) : (
+                        <span className="text-[10px] font-medium text-[#758198] hover:text-[#3478F6] transition-colors">
+                          Set Default
+                        </span>
+                      )}
+                      <span
+                        className="w-1.5 h-1.5 rounded-full bg-[#16A36A]"
+                        title="Connected & Active"
+                      />
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2 shrink-0">
-                    {/* Compact inline device VU meter */}
-                    <div className="w-10 h-1.5 bg-[#E2E8F4]/80 rounded-full overflow-hidden">
-                      <div
-                        style={{
-                          width: `${meterPct}%`,
-                          opacity: isMeterActive ? 1 : 0,
-                          background: getMeterBarGradient(rawPeak),
-                          transition:
-                            'width 75ms ease-out, background-color 0.1s ease, opacity 75ms ease-out',
-                        }}
-                        className="h-full rounded-full"
+                  {/* Bottom Row: Master Volume Slider + Live Meter Background + Quick Mute */}
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    onWheel={(e) => {
+                      e.stopPropagation();
+                      const delta = e.deltaY < 0 ? 2 : -2;
+                      onChangeDeviceVolume(device.id, Math.max(0, Math.min(100, masterVol + delta)));
+                    }}
+                    className="flex items-center gap-2 pt-0.5"
+                  >
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onToggleDeviceMute(device.id);
+                      }}
+                      title={device.muted ? `Unmute ${device.name}` : `Mute ${device.name}`}
+                      className={`p-1 rounded-[7px] transition-colors cursor-pointer shrink-0 ${
+                        device.muted
+                          ? 'bg-rose-500/12 text-rose-600'
+                          : 'text-[#758198] hover:text-[#172033] hover:bg-[#F5F8FF]'
+                      }`}
+                      aria-label={device.muted ? `Unmute ${device.name}` : `Mute ${device.name}`}
+                    >
+                      {device.muted || masterVol === 0 ? (
+                        <VolumeX className="w-3.5 h-3.5" />
+                      ) : (
+                        <Volume2 className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+
+                    <div
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        onChangeDeviceVolume(device.id, 100);
+                      }}
+                      title="Drag or scroll wheel to adjust master volume (Double-click for 100%)"
+                      className="relative flex-1 flex items-center h-4"
+                    >
+                      {/* Unified Slider Track with Live Audio Meter Background Fill */}
+                      <div className="relative w-full h-[6px] rounded-full bg-[#E3EAF6] overflow-hidden pointer-events-none">
+                        {/* Static volume limit indicator */}
+                        <div
+                          className="absolute inset-y-0 left-0 rounded-full"
+                          style={{
+                            width: `${device.muted ? 0 : masterVol}%`,
+                            background: 'rgba(52, 120, 246, 0.22)',
+                          }}
+                        />
+                        {/* Dynamic Live Audio Peak Meter Layer */}
+                        <div
+                          className="absolute inset-y-0 left-0 rounded-full"
+                          style={{
+                            width: `${sliderOverlayPct}%`,
+                            opacity: isMeterActive ? 1 : 0,
+                            background: getMeterBarGradient(rawPeak),
+                            transition:
+                              'width 75ms ease-out, background-color 0.1s ease, opacity 75ms ease-out',
+                          }}
+                        />
+                      </div>
+
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={device.muted ? 0 : masterVol}
+                        onChange={(e) => onChangeDeviceVolume(device.id, Number(e.target.value))}
+                        className="soundflow-slider absolute inset-0 z-10 w-full h-full bg-transparent"
+                        aria-label={`${device.name} master volume`}
                       />
                     </div>
-                    <span className="text-[11px] font-medium text-[#16A36A]">
-                      Connected
+
+                    <span className="w-8 text-right text-[11px] font-mono tabular-nums text-[#758198] font-medium shrink-0">
+                      {device.muted ? 'Mute' : `${masterVol}%`}
                     </span>
                   </div>
                 </div>

@@ -92,6 +92,12 @@ impl CoreAudioEngine {
     pub fn set_default_audio_device(&self, _device_id: String) -> Result<(), String> {
         Ok(())
     }
+    pub fn set_device_volume(&self, _device_id: String, _volume: f32) -> Result<(), String> {
+        Ok(())
+    }
+    pub fn set_device_mute(&self, _device_id: String, _muted: bool) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -177,6 +183,36 @@ async fn set_default_audio_device(
     Ok(())
 }
 
+#[tauri::command]
+async fn set_device_volume(
+    state: tauri::State<'_, Mutex<CoreAudioEngine>>,
+    device_id: String,
+    volume: f32,
+) -> Result<(), String> {
+    ensure_com_initialized();
+    let engine = match state.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let _ = engine.set_device_volume(device_id, volume);
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_device_mute(
+    state: tauri::State<'_, Mutex<CoreAudioEngine>>,
+    device_id: String,
+    muted: bool,
+) -> Result<(), String> {
+    ensure_com_initialized();
+    let engine = match state.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let _ = engine.set_device_mute(device_id, muted);
+    Ok(())
+}
+
 fn main() {
     let builder = tauri::Builder::default()
         .manage(Mutex::new(CoreAudioEngine::new()))
@@ -250,7 +286,9 @@ fn main() {
             set_app_audio_device,
             set_app_volume,
             set_app_mute,
-            set_default_audio_device
+            set_default_audio_device,
+            set_device_volume,
+            set_device_mute
         ]);
 
     if let Err(err) = builder.run(tauri::generate_context!()) {
