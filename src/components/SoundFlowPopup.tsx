@@ -37,6 +37,7 @@ interface SoundFlowPopupProps {
   onRefreshApps: () => void;
   onOpenAdvancedSettings: () => void;
   telemetry: AudioTelemetryFrame;
+  onSliderDragStateChange?: (sliderId: string | null) => void;
 }
 
 /**
@@ -70,6 +71,7 @@ export const SoundFlowPopup: React.FC<SoundFlowPopupProps> = React.memo(
     onRefreshApps,
     onOpenAdvancedSettings,
     telemetry,
+    onSliderDragStateChange,
   }) => {
     const [openDropdownAppId, setOpenDropdownAppId] = useState<string | null>(null);
     const [justRoutedAppId, setJustRoutedAppId] = useState<string | null>(null);
@@ -383,6 +385,14 @@ export const SoundFlowPopup: React.FC<SoundFlowPopupProps> = React.memo(
                         min={0}
                         max={100}
                         value={device.muted ? 0 : masterVol}
+                        onPointerDown={() => onSliderDragStateChange?.(device.id)}
+                        onPointerUp={() => onSliderDragStateChange?.(null)}
+                        onPointerCancel={() => onSliderDragStateChange?.(null)}
+                        onMouseDown={() => onSliderDragStateChange?.(device.id)}
+                        onMouseUp={() => onSliderDragStateChange?.(null)}
+                        onTouchStart={() => onSliderDragStateChange?.(device.id)}
+                        onTouchEnd={() => onSliderDragStateChange?.(null)}
+                        onBlur={() => onSliderDragStateChange?.(null)}
                         onChange={(e) => onChangeDeviceVolume(device.id, Number(e.target.value))}
                         className="soundflow-slider absolute inset-0 z-10 w-full h-full bg-transparent"
                         aria-label={`${device.name} master volume`}
@@ -672,6 +682,14 @@ export const SoundFlowPopup: React.FC<SoundFlowPopupProps> = React.memo(
                           min={0}
                           max={100}
                           value={app.muted ? 0 : app.volume}
+                          onPointerDown={() => onSliderDragStateChange?.(app.id)}
+                          onPointerUp={() => onSliderDragStateChange?.(null)}
+                          onPointerCancel={() => onSliderDragStateChange?.(null)}
+                          onMouseDown={() => onSliderDragStateChange?.(app.id)}
+                          onMouseUp={() => onSliderDragStateChange?.(null)}
+                          onTouchStart={() => onSliderDragStateChange?.(app.id)}
+                          onTouchEnd={() => onSliderDragStateChange?.(null)}
+                          onBlur={() => onSliderDragStateChange?.(null)}
                           onChange={(e) => onChangeAppVolume(app.id, Number(e.target.value))}
                           className="soundflow-slider absolute inset-0 z-10 w-full h-full bg-transparent"
                           aria-label={`${displayAppName} volume`}

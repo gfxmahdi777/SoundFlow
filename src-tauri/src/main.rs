@@ -24,6 +24,10 @@ fn ensure_com_initialized() {}
 pub struct AudioMeterUpdatePayload {
     pub session_peaks: std::collections::HashMap<u32, f32>,
     pub device_peaks: std::collections::HashMap<String, f32>,
+    pub device_volumes: std::collections::HashMap<String, f32>,
+    pub device_mutes: std::collections::HashMap<String, bool>,
+    pub session_volumes: std::collections::HashMap<u32, f32>,
+    pub session_mutes: std::collections::HashMap<u32, bool>,
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -31,6 +35,10 @@ fn sample_audio_meters_snapshot() -> AudioMeterUpdatePayload {
     AudioMeterUpdatePayload {
         session_peaks: std::collections::HashMap::new(),
         device_peaks: std::collections::HashMap::new(),
+        device_volumes: std::collections::HashMap::new(),
+        device_mutes: std::collections::HashMap::new(),
+        session_volumes: std::collections::HashMap::new(),
+        session_mutes: std::collections::HashMap::new(),
     }
 }
 
@@ -215,6 +223,8 @@ async fn set_device_mute(
 
 fn main() {
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Mutex::new(CoreAudioEngine::new()))
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {

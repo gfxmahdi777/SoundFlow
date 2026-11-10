@@ -99,14 +99,22 @@ pub struct AppAudioSessionDto {
 pub struct AudioMeterUpdatePayload {
     pub session_peaks: HashMap<u32, f32>,
     pub device_peaks: HashMap<String, f32>,
+    pub device_volumes: HashMap<String, f32>,
+    pub device_mutes: HashMap<String, bool>,
+    pub session_volumes: HashMap<u32, f32>,
+    pub session_mutes: HashMap<u32, bool>,
 }
 
-/// Samples real-time peak audio values (`0.0` to `1.0`) for all physical output devices
-/// and all active application audio sessions via `IAudioMeterInformation::GetPeakValue()`.
+/// Samples real-time peak audio values (`0.0` to `1.0`), master volume scalars (`0.0` to `1.0`),
+/// and mute states for all physical output devices and active application audio sessions.
 pub fn sample_audio_meters_snapshot() -> AudioMeterUpdatePayload {
     ensure_com_initialized();
     let mut session_peaks: HashMap<u32, f32> = HashMap::new();
     let mut device_peaks: HashMap<String, f32> = HashMap::new();
+    let mut device_volumes: HashMap<String, f32> = HashMap::new();
+    let mut device_mutes: HashMap<String, bool> = HashMap::new();
+    let mut session_volumes: HashMap<u32, f32> = HashMap::new();
+    let mut session_mutes: HashMap<u32, bool> = HashMap::new();
 
     unsafe {
         let enumerator: IMMDeviceEnumerator =
@@ -116,6 +124,10 @@ pub fn sample_audio_meters_snapshot() -> AudioMeterUpdatePayload {
                     return AudioMeterUpdatePayload {
                         session_peaks,
                         device_peaks,
+                        device_volumes,
+                        device_mutes,
+                        session_volumes,
+                        session_mutes,
                     };
                 }
             };
@@ -127,6 +139,10 @@ pub fn sample_audio_meters_snapshot() -> AudioMeterUpdatePayload {
                     return AudioMeterUpdatePayload {
                         session_peaks,
                         device_peaks,
+                        device_volumes,
+                        device_mutes,
+                        session_volumes,
+                        session_mutes,
                     };
                 }
             };
@@ -140,8 +156,8 @@ pub fn sample_audio_meters_snapshot() -> AudioMeterUpdatePayload {
                     .and_then(|pwstr| pwstr_to_string_and_free(pwstr))
                     .unwrap_or_default();
 
-                // 1. Physical Device Peak Meter via IMMDevice::Activate::<IAudioMeterInformation>
                 if !device_id.is_empty() {
+                    // 1a. Physical Device Peak Meter via IMMDevice::Activate::<IAudioMeterInformation>
                     if let Ok(dev_meter) =
                         device.Activate::<IAudioMeterInformation>(CLSCTX_ALL, None)
                     {
@@ -154,9 +170,26 @@ pub fn sample_audio_meters_snapshot() -> AudioMeterUpdatePayload {
                             device_peaks.insert(device_id.clone(), clamped);
                         }
                     }
+
+                    // 1b. Two-Way Physical Device Master Volume & Mute via IAudioEndpointVolume
+                    if let Ok(endpoint_vol) =
+                        device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
+                    {
+                        if let Ok(vol_scalar) = endpoint_vol.GetMasterVolumeLevelScalar() {
+                            let clamped = if vol_scalar.is_finite() {
+                                vol_scalar.clamp(0.0, 1.0)
+                            } else {
+                                1.0
+                            };
+                            device_volumes.insert(device_id.clone(), clamped);
+                        }
+                        if let Ok(muted) = endpoint_vol.GetMute() {
+                            device_mutes.insert(device_id.clone(), muted.as_bool());
+                        }
+                    }
                 }
 
-                // 2. Per-Application Session Peak Meter via IAudioSessionControl -> IAudioMeterInformation
+                // 2. Per-Application Session Peak Meter & Volume/Mute via IAudioSessionControl
                 if let Ok(manager2) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
                     if let Ok(session_enum) = manager2.GetSessionEnumerator() {
                         let session_count = session_enum.GetCount().unwrap_or(0);
@@ -190,6 +223,20 @@ pub fn sample_audio_meters_snapshot() -> AudioMeterUpdatePayload {
                                             }
                                         }
                                     }
+
+                                    if let Ok(simple_vol) = control.cast::<ISimpleAudioVolume>() {
+                                        if let Ok(vol_scalar) = simple_vol.GetMasterVolume() {
+                                            let clamped = if vol_scalar.is_finite() {
+                                                vol_scalar.clamp(0.0, 1.0)
+                                            } else {
+                                                1.0
+                                            };
+                                            session_volumes.insert(pid, clamped);
+                                        }
+                                        if let Ok(muted) = simple_vol.GetMute() {
+                                            session_mutes.insert(pid, muted.as_bool());
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -202,6 +249,10 @@ pub fn sample_audio_meters_snapshot() -> AudioMeterUpdatePayload {
     AudioMeterUpdatePayload {
         session_peaks,
         device_peaks,
+        device_volumes,
+        device_mutes,
+        session_volumes,
+        session_mutes,
     }
 }
 

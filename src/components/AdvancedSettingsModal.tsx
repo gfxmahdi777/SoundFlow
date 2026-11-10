@@ -1,4 +1,7 @@
 import React, { useState } from 'react';
+import { check, Update } from '@tauri-apps/plugin-updater';
+import { relaunch } from '@tauri-apps/plugin-process';
+import { isTauriRuntime } from '../services/tauriBridge';
 import {
   AppAudioSession,
   AppIconType,
@@ -29,6 +32,8 @@ import {
   Volume2,
   VolumeX,
   Code2,
+  RefreshCw,
+  Download,
 } from 'lucide-react';
 
 export interface LaunchableProcessTemplate {
@@ -100,10 +105,102 @@ export const AdvancedSettingsModal: React.FC<AdvancedSettingsModalProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'general' | 'devices' | 'processes' | 'logs'>('general');
   const [editingShortcutKey, setEditingShortcutKey] = useState<keyof GlobalShortcutsConfig | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<
+    'idle' | 'checking' | 'available' | 'downloading' | 'up-to-date' | 'error'
+  >('idle');
+  const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
+  const [updateVersion, setUpdateVersion] = useState<string>('');
+  const [updateNotes, setUpdateNotes] = useState<string>('');
+  const [downloadProgress, setDownloadProgress] = useState<number>(0);
+  const [updateMessage, setUpdateMessage] = useState<string>(
+    'Endpoint: github.com/gfxmahdi777/SoundFlow (v1.0.0)'
+  );
 
   if (!isOpen) return null;
 
   const connectedDevices = devices.filter((d) => d.status === 'connected');
+
+  const handleCheckForUpdates = async () => {
+    setUpdateStatus('checking');
+    setUpdateMessage('Checking GitHub Releases for updates...');
+    try {
+      if (isTauriRuntime()) {
+        const update = await check();
+        if (update) {
+          setPendingUpdate(update);
+          setUpdateVersion(update.version);
+          setUpdateNotes(update.body || 'New SoundFlow release available.');
+          setUpdateStatus('available');
+          setUpdateMessage(
+            `Update v${update.version} is available! Ready to download and install.`
+          );
+          return;
+        }
+        setPendingUpdate(null);
+        setUpdateStatus('up-to-date');
+        setUpdateMessage('You are running the latest version of SoundFlow (v1.0.0).');
+      } else {
+        // Fallback check against GitHub latest.json in browser preview
+        const res = await fetch(
+          'https://github.com/gfxmahdi777/SoundFlow/releases/latest/download/latest.json'
+        ).catch(() => null);
+        if (res && res.ok) {
+          const data = (await res.json()) as { version?: string; notes?: string };
+          if (data.version && data.version !== '1.0.0' && data.version !== 'v1.0.0') {
+            setUpdateVersion(data.version);
+            setUpdateNotes(data.notes || 'New SoundFlow release available on GitHub.');
+            setUpdateStatus('available');
+            setUpdateMessage(`Update ${data.version} found on GitHub Releases.`);
+            return;
+          }
+        }
+        setUpdateStatus('up-to-date');
+        setUpdateMessage('SoundFlow v1.0.0 is up to date.');
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('404') || msg.toLowerCase().includes('release')) {
+        setUpdateStatus('up-to-date');
+        setUpdateMessage('SoundFlow v1.0.0 is up to date (no newer release published yet).');
+      } else {
+        setUpdateStatus('error');
+        setUpdateMessage(`Update check info: ${msg}`);
+      }
+    }
+  };
+
+  const handleInstallUpdate = async () => {
+    if (!pendingUpdate) return;
+    setUpdateStatus('downloading');
+    setDownloadProgress(0);
+    setUpdateMessage(`Downloading SoundFlow v${pendingUpdate.version}...`);
+
+    try {
+      let totalBytes = 0;
+      let downloadedBytes = 0;
+      await pendingUpdate.downloadAndInstall((event) => {
+        if (event.event === 'Started') {
+          totalBytes = event.data.contentLength || 0;
+          downloadedBytes = 0;
+        } else if (event.event === 'Progress') {
+          downloadedBytes += event.data.chunkLength;
+          if (totalBytes > 0) {
+            setDownloadProgress(
+              Math.min(100, Math.round((downloadedBytes / totalBytes) * 100))
+            );
+          }
+        } else if (event.event === 'Finished') {
+          setDownloadProgress(100);
+        }
+      });
+      setUpdateMessage('Update installed! Relaunching SoundFlow...');
+      await relaunch();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setUpdateStatus('error');
+      setUpdateMessage(`Failed to install update: ${msg}`);
+    }
+  };
 
   const handleShortcutKeyDown = (
     e: React.KeyboardEvent<HTMLButtonElement>,
@@ -167,6 +264,25 @@ export const AdvancedSettingsModal: React.FC<AdvancedSettingsModalProps> = ({
           <div className="flex items-center gap-2">
             <button
               type="button"
+              onClick={() => void handleCheckForUpdates()}
+              disabled={updateStatus === 'checking' || updateStatus === 'downloading'}
+              style={{
+                backgroundColor: 'rgba(255, 255, 255, 0.75)',
+                borderColor: 'rgba(255, 255, 255, 0.9)',
+              }}
+              className="px-3 py-1.5 rounded-[10px] hover:bg-white text-xs font-medium text-[#172033] border shadow-2xs flex items-center gap-1.5 cursor-pointer transition-all disabled:opacity-60"
+            >
+              <RefreshCw
+                className={`w-3.5 h-3.5 text-[#3478F6] ${
+                  updateStatus === 'checking' ? 'animate-spin' : ''
+                }`}
+              />
+              <span>
+                {updateStatus === 'checking' ? 'Checking...' : 'Check for Updates'}
+              </span>
+            </button>
+            <button
+              type="button"
               onClick={onOpenTauriCode}
               style={{
                 backgroundColor: 'rgba(255, 255, 255, 0.75)',
@@ -222,6 +338,92 @@ export const AdvancedSettingsModal: React.FC<AdvancedSettingsModalProps> = ({
           {/* TAB 1: General & Shortcuts */}
           {activeTab === 'general' && (
             <div className="space-y-4">
+              {/* In-App Auto-Updater Card */}
+              <div
+                style={{
+                  backgroundColor: 'rgba(255, 255, 255, 0.72)',
+                  borderColor:
+                    updateStatus === 'available'
+                      ? 'rgba(52, 120, 246, 0.45)'
+                      : 'rgba(255, 255, 255, 0.88)',
+                }}
+                className="p-3.5 rounded-[14px] border shadow-2xs flex flex-col gap-2.5"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-semibold text-[#172033] flex items-center gap-2">
+                      <span>SoundFlow Auto-Updater (Tauri v2)</span>
+                      <span className="px-1.5 py-0.5 rounded-[6px] bg-[#3478F6]/10 text-[#3478F6] font-mono text-[10px] font-semibold">
+                        v1.0.0
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-[#758198] mt-0.5">
+                      {updateMessage}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    {updateStatus === 'available' && pendingUpdate ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void handleInstallUpdate()}
+                          className="px-3 py-1.5 rounded-[9px] bg-[#16A36A] hover:bg-[#15803D] text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          <span>Install v{updateVersion} &amp; Restart</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setUpdateStatus('idle')}
+                          className="px-2.5 py-1.5 rounded-[9px] bg-white hover:bg-[#F5F8FF] text-[#758198] hover:text-[#172033] border border-[#172033]/10 text-xs cursor-pointer transition-colors"
+                        >
+                          Later
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void handleCheckForUpdates()}
+                        disabled={
+                          updateStatus === 'checking' || updateStatus === 'downloading'
+                        }
+                        className="px-3 py-1.5 rounded-[9px] bg-[#3478F6] hover:bg-[#2563EB] disabled:opacity-60 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
+                      >
+                        <RefreshCw
+                          className={`w-3.5 h-3.5 ${
+                            updateStatus === 'checking' ? 'animate-spin' : ''
+                          }`}
+                        />
+                        <span>
+                          {updateStatus === 'checking'
+                            ? 'Checking...'
+                            : updateStatus === 'downloading'
+                            ? `Installing (${downloadProgress}%)...`
+                            : 'Check for Updates'}
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {updateStatus === 'available' && updateNotes && (
+                  <div className="px-3 py-2 rounded-[10px] bg-[#F5F8FF] border border-[#3478F6]/20 text-[11px] text-[#172033]">
+                    <span className="font-semibold text-[#3478F6]">Release Notes: </span>
+                    <span>{updateNotes}</span>
+                  </div>
+                )}
+
+                {updateStatus === 'downloading' && (
+                  <div className="w-full h-1.5 rounded-full bg-[#E3EAF6] overflow-hidden">
+                    <div
+                      style={{ width: `${downloadProgress}%` }}
+                      className="h-full bg-[#3478F6] transition-all duration-150"
+                    />
+                  </div>
+                )}
+              </div>
+
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold text-[#758198]">
                   Windows System Tray &amp; Engine Preferences

@@ -296,6 +296,18 @@ export default function App() {
   ]);
 
   const saveTimeoutRef = useRef<number | null>(null);
+  const activeSliderIdRef = useRef<string | null>(null);
+  const lastUserVolumeChangeRef = useRef<Record<string, number>>({});
+
+  const handleSliderDragStateChange = useCallback((sliderId: string | null) => {
+    if (activeSliderIdRef.current && sliderId === null) {
+      lastUserVolumeChangeRef.current[activeSliderIdRef.current] = Date.now();
+    }
+    if (sliderId) {
+      lastUserVolumeChangeRef.current[sliderId] = Date.now();
+    }
+    activeSliderIdRef.current = sliderId;
+  }, []);
 
   const appendLog = useCallback(
     (type: RoutingLogEntry['type'], message: string, detail?: string) => {
@@ -497,6 +509,92 @@ export default function App() {
           audioContextState: 'running',
         };
       });
+
+      // Two-Way Volume & Mute Synchronization (Taskbar / Hardware Media Keys <-> SoundFlow UI)
+      if (
+        payload.deviceVolumes ||
+        payload.deviceMutes ||
+        payload.sessionVolumes ||
+        payload.sessionMutes
+      ) {
+        const now = Date.now();
+        const draggingId = activeSliderIdRef.current;
+
+        setConfig((prev) => {
+          let devicesChanged = false;
+          const nextDevices = prev.devices.map((dev) => {
+            // Do not fight the user while they are actively dragging this slider
+            // or within 500ms of a user-initiated volume/mute adjustment
+            if (
+              draggingId === dev.id ||
+              now - (lastUserVolumeChangeRef.current[dev.id] || 0) < 500
+            ) {
+              return dev;
+            }
+
+            const rawScalar = payload.deviceVolumes?.[dev.id];
+            const externalVol =
+              typeof rawScalar === 'number' && Number.isFinite(rawScalar)
+                ? Math.max(0, Math.min(100, Math.round(rawScalar * 100)))
+                : dev.masterVolume;
+
+            const rawMute = payload.deviceMutes?.[dev.id];
+            const externalMuted =
+              typeof rawMute === 'boolean' ? rawMute : dev.muted;
+
+            if (externalVol !== dev.masterVolume || externalMuted !== dev.muted) {
+              devicesChanged = true;
+              return {
+                ...dev,
+                masterVolume: externalVol,
+                muted: externalMuted,
+              };
+            }
+            return dev;
+          });
+
+          let appsChanged = false;
+          const nextApps = prev.apps.map((app) => {
+            if (
+              draggingId === app.id ||
+              now - (lastUserVolumeChangeRef.current[app.id] || 0) < 500
+            ) {
+              return app;
+            }
+
+            const pidKey = String(app.pid);
+            const rawScalar = payload.sessionVolumes?.[pidKey];
+            const externalVol =
+              typeof rawScalar === 'number' && Number.isFinite(rawScalar)
+                ? Math.max(0, Math.min(100, Math.round(rawScalar * 100)))
+                : app.volume;
+
+            const rawMute = payload.sessionMutes?.[pidKey];
+            const externalMuted =
+              typeof rawMute === 'boolean' ? rawMute : app.muted;
+
+            if (externalVol !== app.volume || externalMuted !== app.muted) {
+              appsChanged = true;
+              return {
+                ...app,
+                volume: externalVol,
+                muted: externalMuted,
+              };
+            }
+            return app;
+          });
+
+          if (!devicesChanged && !appsChanged) {
+            return prev;
+          }
+
+          return {
+            ...prev,
+            devices: devicesChanged ? nextDevices : prev.devices,
+            apps: appsChanged ? nextApps : prev.apps,
+          };
+        });
+      }
     }).then((unlisten) => {
       if (active && unlisten) {
         unlistenFn = unlisten;
@@ -609,6 +707,7 @@ export default function App() {
   const handleChangeAppVolume = useCallback(
     (appId: string, volume: number) => {
       ensureAudioEngineReady();
+      lastUserVolumeChangeRef.current[appId] = Date.now();
       const clamped = Math.max(0, Math.min(100, volume));
       const isMuted = clamped === 0;
 
@@ -651,6 +750,7 @@ export default function App() {
   const handleToggleAppMute = useCallback(
     (appId: string) => {
       ensureAudioEngineReady();
+      lastUserVolumeChangeRef.current[appId] = Date.now();
       setConfig((prev) => {
         const targetApp = prev.apps.find((a) => a.id === appId);
         if (!targetApp) return prev;
@@ -715,6 +815,7 @@ export default function App() {
   const handleChangeDeviceVolume = useCallback(
     (deviceId: string, volume: number) => {
       ensureAudioEngineReady();
+      lastUserVolumeChangeRef.current[deviceId] = Date.now();
       const clamped = Math.max(0, Math.min(100, volume));
       const isMuted = clamped === 0;
 
@@ -742,6 +843,7 @@ export default function App() {
   const handleToggleDeviceMute = useCallback(
     (deviceId: string) => {
       ensureAudioEngineReady();
+      lastUserVolumeChangeRef.current[deviceId] = Date.now();
       setConfig((prev) => {
         const targetDev = prev.devices.find((d) => d.id === deviceId);
         if (!targetDev) return prev;
@@ -1069,6 +1171,7 @@ export default function App() {
           onRefreshApps={handleRefreshSessionsAndDevices}
           onOpenAdvancedSettings={() => setIsAdvancedSettingsOpen(true)}
           telemetry={telemetry}
+          onSliderDragStateChange={handleSliderDragStateChange}
         />
 
         <AdvancedSettingsModal
@@ -1175,6 +1278,7 @@ export default function App() {
             onRefreshApps={handleRefreshSessionsAndDevices}
             onOpenAdvancedSettings={() => setIsAdvancedSettingsOpen(true)}
             telemetry={telemetry}
+            onSliderDragStateChange={handleSliderDragStateChange}
           />
         ) : (
           /* Minimal Frosted Glass Minimized Card when user clicks outside to close popup */

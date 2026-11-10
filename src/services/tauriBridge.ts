@@ -5,6 +5,10 @@ import { AppAudioSession, AudioOutputDevice } from '../types/soundflow';
 export interface AudioMeterUpdatePayload {
   sessionPeaks: Record<string, number>;
   devicePeaks: Record<string, number>;
+  deviceVolumes?: Record<string, number>;
+  deviceMutes?: Record<string, boolean>;
+  sessionVolumes?: Record<string, number>;
+  sessionMutes?: Record<string, boolean>;
 }
 
 /**
