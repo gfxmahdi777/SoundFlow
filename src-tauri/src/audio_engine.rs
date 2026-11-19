@@ -1,12 +1,13 @@
 use crate::com_policy::PolicyConfigClient;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use windows::core::{Interface, PCWSTR, PWSTR};
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolume, IAudioMeterInformation};
 use windows::Win32::Media::Audio::{
-    eMultimedia, eRender, AudioSessionStateActive, IAudioSessionControl, IAudioSessionControl2,
+    eMultimedia, eRender, AudioSessionStateActive, AudioSessionStateExpired,
+    AudioSessionStateInactive, IAudioSessionControl, IAudioSessionControl2,
     IAudioSessionManager2, IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator,
     ISimpleAudioVolume, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
 };
@@ -18,6 +19,7 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
     COINIT_MULTITHREADED, STGM_READ,
 };
+use windows::Win32::System::ProcessStatus::EnumProcesses;
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -195,31 +197,35 @@ pub fn sample_audio_meters_snapshot() -> AudioMeterUpdatePayload {
                         let session_count = session_enum.GetCount().unwrap_or(0);
                         for s_idx in 0..session_count {
                             if let Ok(control) = session_enum.GetSession(s_idx) {
-                                // Only meter active sessions (AudioSessionStateActive == 1)
-                                let is_active = control
-                                    .GetState()
-                                    .map(|st| st.0 == AudioSessionStateActive.0)
-                                    .unwrap_or(false);
-                                if !is_active {
+                                // Include Active & Inactive sessions (skip Expired) so volume/mute
+                                // stays synced even when paused, while only metering active peaks.
+                                let state_val = match control.GetState() {
+                                    Ok(st) => st.0,
+                                    Err(_) => continue,
+                                };
+                                if state_val == AudioSessionStateExpired.0 {
                                     continue;
                                 }
+                                let is_active = state_val == AudioSessionStateActive.0;
 
                                 if let Ok(control2) = control.cast::<IAudioSessionControl2>() {
                                     let pid = control2.GetProcessId().unwrap_or(0);
-                                    if pid == 0 || control2.IsSystemSoundsSession().0 == 0 {
+                                    if pid == 0 || pid == 4 || control2.IsSystemSoundsSession().0 == 0 {
                                         continue;
                                     }
 
-                                    if let Ok(meter) = control.cast::<IAudioMeterInformation>() {
-                                        if let Ok(peak) = meter.GetPeakValue() {
-                                            let clamped = if peak.is_finite() {
-                                                peak.clamp(0.0, 1.0)
-                                            } else {
-                                                0.0
-                                            };
-                                            let entry = session_peaks.entry(pid).or_insert(0.0);
-                                            if clamped > *entry {
-                                                *entry = clamped;
+                                    if is_active {
+                                        if let Ok(meter) = control.cast::<IAudioMeterInformation>() {
+                                            if let Ok(peak) = meter.GetPeakValue() {
+                                                let clamped = if peak.is_finite() {
+                                                    peak.clamp(0.0, 1.0)
+                                                } else {
+                                                    0.0
+                                                };
+                                                let entry = session_peaks.entry(pid).or_insert(0.0);
+                                                if clamped > *entry {
+                                                    *entry = clamped;
+                                                }
                                             }
                                         }
                                     }
@@ -231,10 +237,14 @@ pub fn sample_audio_meters_snapshot() -> AudioMeterUpdatePayload {
                                             } else {
                                                 1.0
                                             };
-                                            session_volumes.insert(pid, clamped);
+                                            if is_active || !session_volumes.contains_key(&pid) {
+                                                session_volumes.insert(pid, clamped);
+                                            }
                                         }
                                         if let Ok(muted) = simple_vol.GetMute() {
-                                            session_mutes.insert(pid, muted.as_bool());
+                                            if is_active || !session_mutes.contains_key(&pid) {
+                                                session_mutes.insert(pid, muted.as_bool());
+                                            }
                                         }
                                     }
                                 }
@@ -258,6 +268,7 @@ pub fn sample_audio_meters_snapshot() -> AudioMeterUpdatePayload {
 
 pub struct CoreAudioEngine {
     pub app_device_assignments: HashMap<u32, String>,
+    pub app_exe_assignments: HashMap<String, String>,
 }
 
 impl CoreAudioEngine {
@@ -266,6 +277,7 @@ impl CoreAudioEngine {
     pub fn new() -> Self {
         Self {
             app_device_assignments: HashMap::new(),
+            app_exe_assignments: HashMap::new(),
         }
     }
 
@@ -351,8 +363,10 @@ impl CoreAudioEngine {
         }
     }
 
-    /// Enumerates ONLY active audio sessions (`AudioSessionStateActive == 1`) via `IAudioSessionManager2`
-    /// and resolves user-friendly application names using `VerQueryValueW` (`FileDescription`).
+    /// Enumerates BOTH Active (`AudioSessionStateActive`) and Inactive (`AudioSessionStateInactive`)
+    /// WASAPI audio sessions (filtering out only `AudioSessionStateExpired` and system idle PID 0/4),
+    /// AND proactively scans running desktop media/browser/creative processes so newly launched apps
+    /// (Chrome, Brave, Edge, VLC, Premiere Pro, After Effects, etc.) appear immediately before audio plays.
     pub fn get_audio_sessions(&self) -> Result<Vec<AppAudioSessionDto>, String> {
         ensure_com_initialized();
         unsafe {
@@ -370,8 +384,12 @@ impl CoreAudioEngine {
             };
 
             let count = collection.GetCount().unwrap_or(0);
-            let mut sessions_by_pid: HashMap<u32, AppAudioSessionDto> = HashMap::new();
+            let current_pid = std::process::id();
+            // Deduplicate by lowercase executable name so multi-process apps (Chrome/Brave/Edge)
+            // appear as a single clean entry and Active streams always override stale Inactive ones.
+            let mut sessions_by_exe: HashMap<String, AppAudioSessionDto> = HashMap::new();
 
+            // 1. Enumerate WASAPI audio sessions (both Active & Inactive; skip Expired & System Sounds)
             for idx in 0..count {
                 if let Ok(device) = collection.Item(idx) {
                     let device_id = device
@@ -387,28 +405,32 @@ impl CoreAudioEngine {
                             let session_count = session_enum.GetCount().unwrap_or(0);
                             for s_idx in 0..session_count {
                                 if let Ok(control) = session_enum.GetSession(s_idx) {
-                                    // 1. ONLY return sessions where state is AudioSessionStateActive (1)
-                                    let is_active = control
-                                        .GetState()
-                                        .map(|st| st.0 == AudioSessionStateActive.0)
-                                        .unwrap_or(false);
-                                    if !is_active {
+                                    let state_val = match control.GetState() {
+                                        Ok(st) => st.0,
+                                        Err(_) => continue,
+                                    };
+                                    // Include BOTH AudioSessionStateActive (1) and AudioSessionStateInactive (0);
+                                    // filter out AudioSessionStateExpired (2).
+                                    let is_active = state_val == AudioSessionStateActive.0;
+                                    let is_inactive = state_val == AudioSessionStateInactive.0;
+                                    if state_val == AudioSessionStateExpired.0
+                                        || (!is_active && !is_inactive)
+                                    {
                                         continue;
                                     }
 
                                     if let Ok(control2) = control.cast::<IAudioSessionControl2>() {
                                         let pid = control2.GetProcessId().unwrap_or(0);
-                                        // Skip System Sounds (PID 0 or IsSystemSoundsSession == S_OK)
+                                        // Skip System Idle (0), System (4), SoundFlow itself, and System Sounds
                                         if pid == 0
                                             || pid == 4
+                                            || pid == current_pid
                                             || control2.IsSystemSoundsSession().0 == 0
-                                            || sessions_by_pid.contains_key(&pid)
                                         {
                                             continue;
                                         }
 
-                                        let (full_path, exe_name) =
-                                            resolve_process_paths(pid);
+                                        let (full_path, exe_name) = resolve_process_paths(pid);
                                         let friendly_app_name = resolve_clean_app_name(
                                             &control,
                                             full_path.as_deref(),
@@ -417,6 +439,12 @@ impl CoreAudioEngine {
                                         let clean_exe = exe_name.unwrap_or_else(|| {
                                             format!("{}.exe", friendly_app_name.replace(' ', ""))
                                         });
+                                        let exe_key = clean_exe.to_lowercase();
+
+                                        if exe_key == "soundflow.exe" || exe_key == "audiodg.exe" {
+                                            continue;
+                                        }
+
                                         let icon_type =
                                             infer_icon_type(&clean_exe, &friendly_app_name);
 
@@ -435,26 +463,43 @@ impl CoreAudioEngine {
                                         let assigned = self
                                             .app_device_assignments
                                             .get(&pid)
+                                            .or_else(|| self.app_exe_assignments.get(&exe_key))
                                             .cloned()
                                             .unwrap_or_else(|| device_id.clone());
 
-                                        sessions_by_pid.insert(
+                                        let candidate = AppAudioSessionDto {
+                                            id: format!("app-{pid}"),
                                             pid,
-                                            AppAudioSessionDto {
-                                                id: format!("app-{pid}"),
-                                                pid,
-                                                name: friendly_app_name.clone(),
-                                                window_title: friendly_app_name,
-                                                executable: clean_exe,
-                                                icon_type,
-                                                assigned_device_id: assigned.clone(),
-                                                preferred_device_id: assigned,
-                                                volume: (raw_vol.clamp(0.0, 1.0) * 100.0).round()
-                                                    as u32,
-                                                muted,
-                                                is_playing: true,
-                                            },
-                                        );
+                                            name: friendly_app_name.clone(),
+                                            window_title: friendly_app_name,
+                                            executable: clean_exe,
+                                            icon_type,
+                                            assigned_device_id: assigned.clone(),
+                                            preferred_device_id: assigned,
+                                            volume: (raw_vol.clamp(0.0, 1.0) * 100.0).round()
+                                                as u32,
+                                            muted,
+                                            is_playing: is_active,
+                                        };
+
+                                        // Prefer Active sessions over Inactive sessions when an app
+                                        // has a stale inactive session left on an old device.
+                                        let should_replace = match sessions_by_exe.get(&exe_key) {
+                                            None => true,
+                                            Some(existing) => {
+                                                (!existing.is_playing && candidate.is_playing)
+                                                    || (existing.is_playing == candidate.is_playing
+                                                        && self
+                                                            .app_exe_assignments
+                                                            .get(&exe_key)
+                                                            .map(|d| d == &device_id)
+                                                            .unwrap_or(false))
+                                            }
+                                        };
+
+                                        if should_replace {
+                                            sessions_by_exe.insert(exe_key, candidate);
+                                        }
                                     }
                                 }
                             }
@@ -463,23 +508,111 @@ impl CoreAudioEngine {
                 }
             }
 
-            let mut list: Vec<AppAudioSessionDto> = sessions_by_pid.into_values().collect();
+            // 2. Proactively scan running desktop media/browser/creative processes so they
+            // appear immediately upon launch even before any audio stream begins playing.
+            for pid in enumerate_running_pids() {
+                if pid == 0 || pid == 4 || pid == current_pid {
+                    continue;
+                }
+                let (full_path, exe_opt) = resolve_process_paths(pid);
+                let Some(exe_name) = exe_opt else {
+                    continue;
+                };
+                let exe_key = exe_name.to_lowercase();
+                if sessions_by_exe.contains_key(&exe_key) || !is_known_desktop_media_app(&exe_key) {
+                    continue;
+                }
+
+                let friendly_app_name = full_path
+                    .as_deref()
+                    .and_then(extract_exe_file_description)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| {
+                        let stem = capitalize_executable_stem(&exe_name);
+                        if stem.is_empty() {
+                            "Unknown App".to_string()
+                        } else {
+                            stem
+                        }
+                    });
+
+                let icon_type = infer_icon_type(&exe_name, &friendly_app_name);
+                let assigned = self
+                    .app_device_assignments
+                    .get(&pid)
+                    .or_else(|| self.app_exe_assignments.get(&exe_key))
+                    .cloned()
+                    .unwrap_or_else(|| "default".to_string());
+
+                sessions_by_exe.insert(
+                    exe_key,
+                    AppAudioSessionDto {
+                        id: format!("app-{pid}"),
+                        pid,
+                        name: friendly_app_name.clone(),
+                        window_title: friendly_app_name,
+                        executable: exe_name,
+                        icon_type,
+                        assigned_device_id: assigned.clone(),
+                        preferred_device_id: assigned,
+                        volume: 100,
+                        muted: false,
+                        is_playing: false,
+                    },
+                );
+            }
+
+            let mut list: Vec<AppAudioSessionDto> = sessions_by_exe.into_values().collect();
             list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
             Ok(list)
         }
     }
 
-    /// Routes an application (by PID) to a specific audio output device using `IPolicyConfig` / `IAudioPolicyConfig`.
+    /// Routes an application (by PID and all sibling processes of the same executable) to a specific
+    /// audio output device across BOTH `eMultimedia` and `eConsole` roles via `IAudioPolicyConfig`.
     pub fn set_app_audio_device(&mut self, pid: u32, device_id: String) -> Result<(), String> {
         ensure_com_initialized();
-        if let Ok(policy) = PolicyConfigClient::new() {
-            let _ = policy.set_app_endpoint(pid, &device_id);
+
+        let (_full_path, exe_opt) = resolve_process_paths(pid);
+        let exe_key = exe_opt.as_deref().map(|s| s.to_lowercase());
+
+        // Collect the primary PID plus all sibling PIDs sharing the same executable (crucial for
+        // multi-process browsers like Chrome/Brave/Edge and creative suites like Premiere Pro).
+        let mut target_pids: Vec<u32> = vec![pid];
+        if let Some(ref key) = exe_key {
+            for sibling_pid in find_pids_by_executable(key) {
+                if !target_pids.contains(&sibling_pid) {
+                    target_pids.push(sibling_pid);
+                }
+            }
         }
-        self.app_device_assignments.insert(pid, device_id);
+
+        if let Ok(policy) = PolicyConfigClient::new() {
+            let _ = policy.set_app_endpoints(&target_pids, &device_id);
+        }
+
+        let trimmed = device_id.trim();
+        let is_reset = trimmed.is_empty() || trimmed == "default" || trimmed == "unassigned";
+        if is_reset {
+            for &p in &target_pids {
+                self.app_device_assignments.remove(&p);
+            }
+            if let Some(ref key) = exe_key {
+                self.app_exe_assignments.remove(key);
+            }
+        } else {
+            for &p in &target_pids {
+                self.app_device_assignments.insert(p, device_id.clone());
+            }
+            if let Some(key) = exe_key {
+                self.app_exe_assignments.insert(key, device_id);
+            }
+        }
         Ok(())
     }
 
     /// Sets per-application volume (`0.0` to `1.0` or `0.0` to `100.0`) via `ISimpleAudioVolume`.
+    /// Matches both the given PID and sibling PIDs of the same executable for multi-process apps.
     pub fn set_app_volume(&self, pid: u32, volume: f32) -> Result<(), String> {
         ensure_com_initialized();
         let normalized = if volume > 1.0 {
@@ -487,6 +620,8 @@ impl CoreAudioEngine {
         } else {
             volume.clamp(0.0, 1.0)
         };
+
+        let target_pids = collect_app_pid_set(pid);
 
         unsafe {
             let enumerator: IMMDeviceEnumerator =
@@ -511,7 +646,8 @@ impl CoreAudioEngine {
                             for s_idx in 0..session_count {
                                 if let Ok(control) = session_enum.GetSession(s_idx) {
                                     if let Ok(control2) = control.cast::<IAudioSessionControl2>() {
-                                        if control2.GetProcessId().unwrap_or(0) == pid {
+                                        let session_pid = control2.GetProcessId().unwrap_or(0);
+                                        if target_pids.contains(&session_pid) {
                                             if let Ok(vol) = control.cast::<ISimpleAudioVolume>() {
                                                 let _ = vol.SetMasterVolume(
                                                     normalized,
@@ -531,8 +667,11 @@ impl CoreAudioEngine {
     }
 
     /// Mutes or unmutes a specific application's audio session via `ISimpleAudioVolume::SetMute`.
+    /// Matches both the given PID and sibling PIDs of the same executable for multi-process apps.
     pub fn set_app_mute(&self, pid: u32, muted: bool) -> Result<(), String> {
         ensure_com_initialized();
+        let target_pids = collect_app_pid_set(pid);
+
         unsafe {
             let enumerator: IMMDeviceEnumerator =
                 match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
@@ -556,7 +695,8 @@ impl CoreAudioEngine {
                             for s_idx in 0..session_count {
                                 if let Ok(control) = session_enum.GetSession(s_idx) {
                                     if let Ok(control2) = control.cast::<IAudioSessionControl2>() {
-                                        if control2.GetProcessId().unwrap_or(0) == pid {
+                                        let session_pid = control2.GetProcessId().unwrap_or(0);
+                                        if target_pids.contains(&session_pid) {
                                             if let Ok(vol) = control.cast::<ISimpleAudioVolume>() {
                                                 let _ = vol.SetMute(muted, std::ptr::null());
                                             }
@@ -965,3 +1105,109 @@ fn infer_icon_type(exe: &str, friendly_name: &str) -> String {
         "game".to_string()
     }
 }
+
+/// Enumerates all running Windows process IDs safely via `EnumProcesses` (psapi).
+fn enumerate_running_pids() -> Vec<u32> {
+    unsafe {
+        let mut pids = vec![0u32; 2048];
+        let mut bytes_returned: u32 = 0;
+        let ok = EnumProcesses(
+            pids.as_mut_ptr(),
+            (pids.len() * std::mem::size_of::<u32>()) as u32,
+            &mut bytes_returned,
+        )
+        .is_ok();
+        if !ok || bytes_returned == 0 {
+            return Vec::new();
+        }
+        let count = (bytes_returned as usize / std::mem::size_of::<u32>()).min(pids.len());
+        pids.truncate(count);
+        pids
+    }
+}
+
+/// Finds all currently running PIDs whose executable filename matches `target_exe_lower`.
+fn find_pids_by_executable(target_exe_lower: &str) -> Vec<u32> {
+    let mut matches = Vec::new();
+    for pid in enumerate_running_pids() {
+        if pid == 0 || pid == 4 {
+            continue;
+        }
+        let (_path, exe_opt) = resolve_process_paths(pid);
+        if let Some(exe) = exe_opt {
+            if exe.to_lowercase() == target_exe_lower {
+                matches.push(pid);
+            }
+        }
+    }
+    matches
+}
+
+/// Collects a `HashSet` containing `pid` plus any sibling PIDs sharing the same executable image.
+fn collect_app_pid_set(pid: u32) -> HashSet<u32> {
+    let mut set = HashSet::new();
+    set.insert(pid);
+    let (_path, exe_opt) = resolve_process_paths(pid);
+    if let Some(exe) = exe_opt {
+        let lower = exe.to_lowercase();
+        for sibling in find_pids_by_executable(&lower) {
+            set.insert(sibling);
+        }
+    }
+    set
+}
+
+/// Returns true for well-known desktop media, browser, creative, communication, and streaming
+/// executables so they appear immediately in Application Routing upon launch even before audio plays.
+fn is_known_desktop_media_app(exe_lower: &str) -> bool {
+    matches!(
+        exe_lower,
+        "chrome.exe"
+            | "brave.exe"
+            | "msedge.exe"
+            | "firefox.exe"
+            | "opera.exe"
+            | "opera_gx.exe"
+            | "vivaldi.exe"
+            | "arc.exe"
+            | "waterfox.exe"
+            | "zen.exe"
+            | "vlc.exe"
+            | "spotify.exe"
+            | "itunes.exe"
+            | "applemusic.exe"
+            | "tidal.exe"
+            | "foobar2000.exe"
+            | "mpc-hc64.exe"
+            | "mpc-hc.exe"
+            | "mpc-be64.exe"
+            | "potplayermini64.exe"
+            | "potplayer64.exe"
+            | "wmplayer.exe"
+            | "music.ui.exe"
+            | "winamp.exe"
+            | "aimp.exe"
+            | "mpv.exe"
+            | "adobe premiere pro.exe"
+            | "afterfx.exe"
+            | "adobe audition.exe"
+            | "resolve.exe"
+            | "davinciresolve.exe"
+            | "obs64.exe"
+            | "obs32.exe"
+            | "streamlabs obs.exe"
+            | "fl64.exe"
+            | "audacity.exe"
+            | "capcut.exe"
+            | "discord.exe"
+            | "teams.exe"
+            | "ms-teams.exe"
+            | "zoom.exe"
+            | "slack.exe"
+            | "telegram.exe"
+            | "whatsapp.exe"
+            | "steam.exe"
+    ) || exe_lower.starts_with("ableton live")
+        || exe_lower.starts_with("vegas")
+}
+

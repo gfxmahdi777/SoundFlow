@@ -79,21 +79,24 @@ impl PolicyConfigClient {
     /// Formats a raw MMDevice ID (`{0.0.0.00000000}.{guid}`) into the WinRT DEVINTERFACE_AUDIO_RENDER
     /// string required by `IAudioPolicyConfig::SetPersistedDefaultAudioEndpoint`.
     fn format_mmdevice_to_devinterface(device_id: &str) -> HSTRING {
-        if device_id.is_empty() || device_id == "default" || device_id == "unassigned" {
+        let trimmed = device_id.trim();
+        if trimmed.is_empty() || trimmed == "default" || trimmed == "unassigned" {
             return HSTRING::new();
         }
-        if device_id.starts_with(r"\\?\SWD#MMDEVAPI#") {
-            return HSTRING::from(device_id);
+        if trimmed.starts_with(r"\\?\SWD#MMDEVAPI#") {
+            return HSTRING::from(trimmed);
         }
         let formatted = format!(
-            r"\\?\SWD#MMDEVAPI#{device_id}#{{e6327cad-dcec-4949-ae8a-991e976a79d2}}"
+            r"\\?\SWD#MMDEVAPI#{trimmed}#{{e6327cad-dcec-4949-ae8a-991e976a79d2}}"
         );
         HSTRING::from(formatted)
     }
 
-    /// Routes a specific Windows application (by PID) to a physical audio output device.
-    /// Passing `"default"` or `""` clears the override so the app follows the system default.
-    pub fn set_app_endpoint(&self, pid: u32, device_id: &str) -> Result<(), String> {
+    /// Routes one or more Windows process IDs (e.g. an app's main process and sibling audio helper
+    /// processes) to a physical audio output device across BOTH `eMultimedia` and `eConsole` roles
+    /// so Windows never falls back to the system default endpoint (e.g. Realtek HD Audio).
+    /// Passing `"default"`, `"unassigned"`, or `""` clears the persisted override.
+    pub fn set_app_endpoints(&self, pids: &[u32], device_id: &str) -> Result<(), String> {
         ensure_com_initialized();
         unsafe {
             let class_name = HSTRING::from("Windows.Media.Internal.AudioPolicyConfig");
@@ -112,26 +115,40 @@ impl PolicyConfigClient {
                         let target_hstring = Self::format_mmdevice_to_devinterface(device_id);
                         let raw_hstring: *mut c_void = std::mem::transmute_copy(&target_hstring);
 
-                        let _ = ((*vtbl).SetPersistedDefaultAudioEndpoint)(
-                            raw_ptr,
-                            pid,
-                            eRender,
-                            eMultimedia,
-                            raw_hstring,
-                        );
-                        let _ = ((*vtbl).SetPersistedDefaultAudioEndpoint)(
-                            raw_ptr,
-                            pid,
-                            eRender,
-                            eConsole,
-                            raw_hstring,
-                        );
+                        for &pid in pids {
+                            if pid == 0 || pid == 4 {
+                                continue;
+                            }
+                            // Apply to BOTH eMultimedia AND eConsole roles so apps using either
+                            // role (browsers, Premiere Pro, games, media players) do not fall back
+                            // to the default Realtek endpoint when switching outputs.
+                            let _ = ((*vtbl).SetPersistedDefaultAudioEndpoint)(
+                                raw_ptr,
+                                pid,
+                                eRender,
+                                eMultimedia,
+                                raw_hstring,
+                            );
+                            let _ = ((*vtbl).SetPersistedDefaultAudioEndpoint)(
+                                raw_ptr,
+                                pid,
+                                eRender,
+                                eConsole,
+                                raw_hstring,
+                            );
+                        }
                         let _ = ((*vtbl).base__.Release)(raw_ptr);
                     }
                 }
             }
             Ok(())
         }
+    }
+
+    /// Routes a single Windows application PID across both `eMultimedia` and `eConsole` roles.
+    #[allow(dead_code)]
+    pub fn set_app_endpoint(&self, pid: u32, device_id: &str) -> Result<(), String> {
+        self.set_app_endpoints(&[pid], device_id)
     }
 
     /// Sets the system-wide default playback audio endpoint across Console & Multimedia roles.
@@ -145,8 +162,11 @@ impl PolicyConfigClient {
                 if unknown.query(&IID_IPOLICY_CONFIG, &mut raw_ptr).is_ok() && !raw_ptr.is_null() {
                     let vtbl = *(raw_ptr as *const *const IPolicyConfig_Vtbl);
                     if !vtbl.is_null() {
-                        let wide: Vec<u16> =
-                            device_id.encode_utf16().chain(std::iter::once(0)).collect();
+                        let wide: Vec<u16> = device_id
+                            .trim()
+                            .encode_utf16()
+                            .chain(std::iter::once(0))
+                            .collect();
                         let pcwstr = PCWSTR(wide.as_ptr());
                         let _ = ((*vtbl).SetDefaultEndpoint)(raw_ptr, pcwstr, eConsole);
                         let _ = ((*vtbl).SetDefaultEndpoint)(raw_ptr, pcwstr, eMultimedia);

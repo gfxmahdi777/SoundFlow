@@ -334,20 +334,58 @@ export default function App() {
     ]);
 
     setConfig((prev) => {
+      const now = Date.now();
+      const draggingId = activeSliderIdRef.current;
+
       const nextDevices =
-        nativeDevices && nativeDevices.length > 0 ? nativeDevices : prev.devices;
+        nativeDevices && nativeDevices.length > 0
+          ? nativeDevices.map((dev) => {
+              if (
+                draggingId === dev.id ||
+                now - (lastUserVolumeChangeRef.current[dev.id] || 0) < 500
+              ) {
+                const existing = prev.devices.find((d) => d.id === dev.id);
+                if (existing) {
+                  return {
+                    ...dev,
+                    masterVolume: existing.masterVolume,
+                    muted: existing.muted,
+                  };
+                }
+              }
+              return dev;
+            })
+          : prev.devices;
+
       const defaultDev =
         nextDevices.find((d) => d.isDefault) ||
         nextDevices[0] || { id: prev.defaultDeviceId };
+
       const nextApps =
         nativeSessions !== null
-          ? nativeSessions.map((session) => ({
-              ...session,
-              name:
-                session.name && session.name.trim()
-                  ? session.name.trim()
-                  : 'Unknown App',
-            }))
+          ? nativeSessions.map((session) => {
+              const cleaned = {
+                ...session,
+                name:
+                  session.name && session.name.trim()
+                    ? session.name.trim()
+                    : 'Unknown App',
+              };
+              if (
+                draggingId === cleaned.id ||
+                now - (lastUserVolumeChangeRef.current[cleaned.id] || 0) < 500
+              ) {
+                const existing = prev.apps.find((a) => a.id === cleaned.id);
+                if (existing) {
+                  return {
+                    ...cleaned,
+                    volume: existing.volume,
+                    muted: existing.muted,
+                  };
+                }
+              }
+              return cleaned;
+            })
           : prev.apps;
 
       return {

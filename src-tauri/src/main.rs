@@ -223,6 +223,16 @@ async fn set_device_mute(
 
 fn main() {
     let builder = tauri::Builder::default()
+        // Enforce single instance FIRST so launching again focuses the existing window
+        // instead of spawning duplicate processes and duplicate System Tray icons.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_always_on_top(true);
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Mutex::new(CoreAudioEngine::new()))
@@ -250,32 +260,35 @@ fn main() {
                 });
             }
 
-            // V2 Tray Logic: toggle visibility and force to absolute front on click
-            let mut tray_builder = TrayIconBuilder::new();
-            if let Some(icon) = app.default_window_icon() {
-                tray_builder = tray_builder.icon(icon.clone());
-            }
-            let _ = tray_builder
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        if let Some(window) = tray.app_handle().get_webview_window("main") {
-                            if window.is_visible().unwrap_or(false) {
-                                let _ = window.hide();
-                            } else {
-                                let _ = window.unminimize();
-                                let _ = window.show();
-                                let _ = window.set_always_on_top(true);
-                                let _ = window.set_focus();
+            // V2 Tray Logic: strictly use unique ID "main-tray" so duplicate tray icons are never created
+            if app.tray_by_id("main-tray").is_none() {
+                let mut tray_builder =
+                    TrayIconBuilder::with_id("main-tray").tooltip("SoundFlow");
+                if let Some(icon) = app.default_window_icon() {
+                    tray_builder = tray_builder.icon(icon.clone());
+                }
+                let _ = tray_builder
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            if let Some(window) = tray.app_handle().get_webview_window("main") {
+                                if window.is_visible().unwrap_or(false) {
+                                    let _ = window.hide();
+                                } else {
+                                    let _ = window.unminimize();
+                                    let _ = window.show();
+                                    let _ = window.set_always_on_top(true);
+                                    let _ = window.set_focus();
+                                }
                             }
                         }
-                    }
-                })
-                .build(app);
+                    })
+                    .build(app);
+            }
 
             // Spawn background 65ms real-time audio metering thread emitting "audio_meter_update"
             let meter_app_handle = app.handle().clone();
