@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { getVersion } from '@tauri-apps/api/app';
 import { check, Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { isTauriRuntime } from '../services/tauriBridge';
@@ -105,6 +106,7 @@ export const AdvancedSettingsModal: React.FC<AdvancedSettingsModalProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'general' | 'devices' | 'processes' | 'logs'>('general');
   const [editingShortcutKey, setEditingShortcutKey] = useState<keyof GlobalShortcutsConfig | null>(null);
+  const [appVersion, setAppVersion] = useState<string>('1.0.0');
   const [updateStatus, setUpdateStatus] = useState<
     'idle' | 'checking' | 'available' | 'downloading' | 'up-to-date' | 'error'
   >('idle');
@@ -112,17 +114,99 @@ export const AdvancedSettingsModal: React.FC<AdvancedSettingsModalProps> = ({
   const [updateVersion, setUpdateVersion] = useState<string>('');
   const [updateNotes, setUpdateNotes] = useState<string>('');
   const [downloadProgress, setDownloadProgress] = useState<number>(0);
+  const [downloadDetail, setDownloadDetail] = useState<string>('');
   const [updateMessage, setUpdateMessage] = useState<string>(
-    'Endpoint: github.com/gfxmahdi777/SoundFlow (v1.0.0)'
+    'Endpoint: github.com/gfxmahdi777/SoundFlow/releases/latest'
   );
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let cancelled = false;
+    getVersion()
+      .then((ver) => {
+        if (!cancelled && ver) {
+          setAppVersion(ver);
+        }
+      })
+      .catch(() => {
+        // Fallback to default appVersion if unavailable
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (pendingUpdate) {
+        void pendingUpdate.close().catch(() => {});
+      }
+    };
+  }, [pendingUpdate]);
 
   if (!isOpen) return null;
 
   const connectedDevices = devices.filter((d) => d.status === 'connected');
 
+  const formatBytes = (bytes: number): string => {
+    if (bytes <= 0) return '0 B';
+    const mb = bytes / (1024 * 1024);
+    if (mb >= 1) return `${mb.toFixed(1)} MB`;
+    return `${Math.round(bytes / 1024)} KB`;
+  };
+
+  const classifyUpdaterError = (rawMessage: string): string => {
+    const lower = rawMessage.toLowerCase();
+    if (
+      lower.includes('404') ||
+      lower.includes('could not fetch a valid release json') ||
+      lower.includes('no release') ||
+      lower.includes('not found')
+    ) {
+      return 'No published update manifest (latest.json) was found on GitHub Releases yet. Push a v* tag to publish your first release.';
+    }
+    if (
+      lower.includes('signature') ||
+      lower.includes('pubkey') ||
+      lower.includes('minisign') ||
+      lower.includes('public key')
+    ) {
+      return 'Update signature verification failed. Verify that the pubkey in tauri.conf.json matches your GitHub TAURI_SIGNING_PRIVATE_KEY secret.';
+    }
+    if (
+      lower.includes('network') ||
+      lower.includes('dns') ||
+      lower.includes('timed out') ||
+      lower.includes('timeout') ||
+      lower.includes('failed to send request') ||
+      lower.includes('connection') ||
+      lower.includes('offline')
+    ) {
+      return 'Unable to reach GitHub Releases. Check your internet connection or firewall and try again.';
+    }
+    return `Update check failed: ${rawMessage}`;
+  };
+
+  const handleDismissUpdate = async () => {
+    if (pendingUpdate) {
+      await pendingUpdate.close().catch(() => {});
+      setPendingUpdate(null);
+    }
+    setUpdateStatus('idle');
+    setUpdateMessage(`Current version: v${appVersion} · Endpoint: github.com/gfxmahdi777/SoundFlow`);
+  };
+
   const handleCheckForUpdates = async () => {
+    if (pendingUpdate) {
+      await pendingUpdate.close().catch(() => {});
+      setPendingUpdate(null);
+    }
+
     setUpdateStatus('checking');
+    setDownloadProgress(0);
+    setDownloadDetail('');
     setUpdateMessage('Checking GitHub Releases for updates...');
+
     try {
       if (isTauriRuntime()) {
         const update = await check();
@@ -132,40 +216,45 @@ export const AdvancedSettingsModal: React.FC<AdvancedSettingsModalProps> = ({
           setUpdateNotes(update.body || 'New SoundFlow release available.');
           setUpdateStatus('available');
           setUpdateMessage(
-            `Update v${update.version} is available! Ready to download and install.`
+            `Update v${update.version} is available (installed: v${appVersion}). Ready to download and install.`
           );
           return;
         }
-        setPendingUpdate(null);
         setUpdateStatus('up-to-date');
-        setUpdateMessage('You are running the latest version of SoundFlow (v1.0.0).');
+        setUpdateMessage(`You are running the latest version of SoundFlow (v${appVersion}).`);
       } else {
         // Fallback check against GitHub latest.json in browser preview
         const res = await fetch(
           'https://github.com/gfxmahdi777/SoundFlow/releases/latest/download/latest.json'
-        ).catch(() => null);
-        if (res && res.ok) {
-          const data = (await res.json()) as { version?: string; notes?: string };
-          if (data.version && data.version !== '1.0.0' && data.version !== 'v1.0.0') {
-            setUpdateVersion(data.version);
-            setUpdateNotes(data.notes || 'New SoundFlow release available on GitHub.');
-            setUpdateStatus('available');
-            setUpdateMessage(`Update ${data.version} found on GitHub Releases.`);
-            return;
-          }
+        );
+        if (res.status === 404) {
+          setUpdateStatus('error');
+          setUpdateMessage(
+            'No published update manifest (latest.json) was found on GitHub Releases yet. Push a v* tag to publish your first release.'
+          );
+          return;
+        }
+        if (!res.ok) {
+          throw new Error(`GitHub Releases returned HTTP ${res.status}`);
+        }
+        const data = (await res.json()) as { version?: string; notes?: string };
+        const remoteVersion = (data.version || '').replace(/^v/, '');
+        if (remoteVersion && remoteVersion !== appVersion) {
+          setUpdateVersion(remoteVersion);
+          setUpdateNotes(data.notes || 'New SoundFlow release available on GitHub.');
+          setUpdateStatus('available');
+          setUpdateMessage(
+            `Update v${remoteVersion} found on GitHub Releases (install inside the SoundFlow Windows app).`
+          );
+          return;
         }
         setUpdateStatus('up-to-date');
-        setUpdateMessage('SoundFlow v1.0.0 is up to date.');
+        setUpdateMessage(`You are running the latest version of SoundFlow (v${appVersion}).`);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('404') || msg.toLowerCase().includes('release')) {
-        setUpdateStatus('up-to-date');
-        setUpdateMessage('SoundFlow v1.0.0 is up to date (no newer release published yet).');
-      } else {
-        setUpdateStatus('error');
-        setUpdateMessage(`Update check info: ${msg}`);
-      }
+      setUpdateStatus('error');
+      setUpdateMessage(classifyUpdaterError(msg));
     }
   };
 
@@ -173,6 +262,7 @@ export const AdvancedSettingsModal: React.FC<AdvancedSettingsModalProps> = ({
     if (!pendingUpdate) return;
     setUpdateStatus('downloading');
     setDownloadProgress(0);
+    setDownloadDetail('Starting download...');
     setUpdateMessage(`Downloading SoundFlow v${pendingUpdate.version}...`);
 
     try {
@@ -182,15 +272,23 @@ export const AdvancedSettingsModal: React.FC<AdvancedSettingsModalProps> = ({
         if (event.event === 'Started') {
           totalBytes = event.data.contentLength || 0;
           downloadedBytes = 0;
+          setDownloadDetail(
+            totalBytes > 0 ? `0 MB / ${formatBytes(totalBytes)}` : 'Downloading package...'
+          );
         } else if (event.event === 'Progress') {
           downloadedBytes += event.data.chunkLength;
           if (totalBytes > 0) {
-            setDownloadProgress(
-              Math.min(100, Math.round((downloadedBytes / totalBytes) * 100))
+            const pct = Math.min(100, Math.round((downloadedBytes / totalBytes) * 100));
+            setDownloadProgress(pct);
+            setDownloadDetail(
+              `${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)} (${pct}%)`
             );
+          } else {
+            setDownloadDetail(`${formatBytes(downloadedBytes)} downloaded`);
           }
         } else if (event.event === 'Finished') {
           setDownloadProgress(100);
+          setDownloadDetail('Verifying signature and installing...');
         }
       });
       setUpdateMessage('Update installed! Relaunching SoundFlow...');
@@ -198,7 +296,7 @@ export const AdvancedSettingsModal: React.FC<AdvancedSettingsModalProps> = ({
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setUpdateStatus('error');
-      setUpdateMessage(`Failed to install update: ${msg}`);
+      setUpdateMessage(`Failed to install update: ${classifyUpdaterError(msg)}`);
     }
   };
 
@@ -345,20 +443,38 @@ export const AdvancedSettingsModal: React.FC<AdvancedSettingsModalProps> = ({
                   borderColor:
                     updateStatus === 'available'
                       ? 'rgba(52, 120, 246, 0.45)'
+                      : updateStatus === 'up-to-date'
+                      ? 'rgba(22, 163, 106, 0.35)'
+                      : updateStatus === 'error'
+                      ? 'rgba(245, 158, 11, 0.45)'
                       : 'rgba(255, 255, 255, 0.88)',
                 }}
                 className="p-3.5 rounded-[14px] border shadow-2xs flex flex-col gap-2.5"
               >
                 <div className="flex items-center justify-between gap-3">
-                  <div>
+                  <div className="min-w-0">
                     <div className="text-xs font-semibold text-[#172033] flex items-center gap-2">
                       <span>SoundFlow Auto-Updater (Tauri v2)</span>
                       <span className="px-1.5 py-0.5 rounded-[6px] bg-[#3478F6]/10 text-[#3478F6] font-mono text-[10px] font-semibold">
-                        v1.0.0
+                        v{appVersion}
                       </span>
                     </div>
-                    <div className="text-[11px] text-[#758198] mt-0.5">
-                      {updateMessage}
+                    <div
+                      className={`text-[11px] mt-0.5 flex items-start gap-1.5 ${
+                        updateStatus === 'error'
+                          ? 'text-amber-700'
+                          : updateStatus === 'up-to-date'
+                          ? 'text-[#16A36A]'
+                          : 'text-[#758198]'
+                      }`}
+                    >
+                      {updateStatus === 'up-to-date' && (
+                        <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                      )}
+                      {updateStatus === 'error' && (
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                      )}
+                      <span>{updateMessage}</span>
                     </div>
                   </div>
 
@@ -375,7 +491,7 @@ export const AdvancedSettingsModal: React.FC<AdvancedSettingsModalProps> = ({
                         </button>
                         <button
                           type="button"
-                          onClick={() => setUpdateStatus('idle')}
+                          onClick={() => void handleDismissUpdate()}
                           className="px-2.5 py-1.5 rounded-[9px] bg-white hover:bg-[#F5F8FF] text-[#758198] hover:text-[#172033] border border-[#172033]/10 text-xs cursor-pointer transition-colors"
                         >
                           Later
@@ -415,11 +531,18 @@ export const AdvancedSettingsModal: React.FC<AdvancedSettingsModalProps> = ({
                 )}
 
                 {updateStatus === 'downloading' && (
-                  <div className="w-full h-1.5 rounded-full bg-[#E3EAF6] overflow-hidden">
-                    <div
-                      style={{ width: `${downloadProgress}%` }}
-                      className="h-full bg-[#3478F6] transition-all duration-150"
-                    />
+                  <div className="space-y-1">
+                    <div className="w-full h-1.5 rounded-full bg-[#E3EAF6] overflow-hidden">
+                      <div
+                        style={{ width: `${downloadProgress}%` }}
+                        className="h-full bg-[#3478F6] transition-all duration-150"
+                      />
+                    </div>
+                    {downloadDetail && (
+                      <div className="text-[10.5px] font-mono tabular-nums text-[#758198] text-right">
+                        {downloadDetail}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

@@ -1,12 +1,10 @@
-name: Build SoundFlow Windows Installer
+name: Build SoundFlow Windows Installer (CI)
 
 on:
   push:
     branches:
       - main
       - master
-    tags:
-      - 'v*'
   pull_request:
     branches:
       - main
@@ -14,14 +12,12 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-windows:
     name: Build Windows Tauri 2 App (.exe / .msi)
     runs-on: windows-latest
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout repository
@@ -34,6 +30,11 @@ jobs:
 
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
 
       - name: Clean any platform-specific lockfiles
         shell: pwsh
@@ -48,11 +49,17 @@ jobs:
         run: npm run build
 
       - name: Build Tauri 2 Windows Installer
+        shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY || 'dW50cnVzdGVkIGNvbW1lbnQ6IHJzaWduIGVuY3J5cHRlZCBzZWNyZXQga2V5ClJXUlRZMEl5TGJFSlB3WXUwOGtUWUd1SWRsUWQ2NVUzY0E1emVwU0FOYVpqNjEzL2ptWUFBQkFBQUFBQUFBQUFBQUlBQUFBQUtHVExrRXhzY2tUSEM3YWo3VXd2WFNCamVSMUdXdFZMcGNudWNNTHp0UkJnQTVFVUt2NUg1SkdGZ0NBeTViTk5RR0FiZHBKVSszSEM3NkFnZ1FBd0Eyc3B3SURWbDhGQm0zeDQxRDRjV001bEFhY211Q1IvTUxGRnhUalI4UWFwdy9WakgxOFZvR1k9Cg==' }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
-        run: npx tauri build
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            Write-Host "No TAURI_SIGNING_PRIVATE_KEY secret provided; building unsigned CI artifacts."
+            npx tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          } else {
+            npx tauri build
+          }
 
       - name: Upload Windows NSIS (.exe) & MSI Installers as Artifacts
         uses: actions/upload-artifact@v4
@@ -65,15 +72,3 @@ jobs:
             src-tauri/target/release/bundle/msi/*.sig
             src-tauri/target/release/soundflow.exe
           if-no-files-found: warn
-
-      - name: Create GitHub Release on Tag Push
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          files: |
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/msi/*.msi
-          generate_release_notes: true
-

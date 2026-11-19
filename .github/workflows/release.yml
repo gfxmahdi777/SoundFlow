@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   release-tauri:
-    name: Build & Publish Tauri v2 Release (.exe + latest.json)
+    name: Build & Publish Tauri v2 Release (.exe, .msi & latest.json)
     runs-on: windows-latest
     permissions:
       contents: write
@@ -19,6 +19,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Verify Tauri signing secret is configured
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            Write-Error "Missing GitHub Secret: TAURI_SIGNING_PRIVATE_KEY. Generate a key pair with 'npx tauri signer generate' and add the private key to Repository Secrets."
+            exit 1
+          }
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -26,6 +36,11 @@ jobs:
 
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
 
       - name: Clean any platform-specific lockfiles
         shell: pwsh
@@ -36,15 +51,16 @@ jobs:
       - name: Install frontend dependencies
         run: npm install --no-package-lock --legacy-peer-deps
 
-      - name: Build and Release with tauri-action
+      - name: Build, Sign & Publish GitHub Release with tauri-action
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY || 'dW50cnVzdGVkIGNvbW1lbnQ6IHJzaWduIGVuY3J5cHRlZCBzZWNyZXQga2V5ClJXUlRZMEl5TGJFSlB3WXUwOGtUWUd1SWRsUWQ2NVUzY0E1emVwU0FOYVpqNjEzL2ptWUFBQkFBQUFBQUFBQUFBQUlBQUFBQUtHVExrRXhzY2tUSEM3YWo3VXd2WFNCamVSMUdXdFZMcGNudWNNTHp0UkJnQTVFVUt2NUg1SkdGZ0NBeTViTk5RR0FiZHBKVSszSEM3NkFnZ1FBd0Eyc3B3SURWbDhGQm0zeDQxRDRjV001bEFhY211Q1IvTUxGRnhUalI4UWFwdy9WakgxOFZvR1k9Cg==' }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'SoundFlow ${{ github.ref_name }}'
-          releaseBody: 'Automated Windows Tauri v2 installer and auto-updater release (`latest.json`, `.exe`, `.msi`, `.sig`).'
+          releaseBody: 'Automated Windows Tauri v2 installer and signed auto-updater release (`latest.json`, `.exe`, `.msi`, `.sig`).'
           releaseDraft: false
           prerelease: false
+          includeUpdaterJson: true
