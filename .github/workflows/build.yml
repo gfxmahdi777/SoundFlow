@@ -56,7 +56,14 @@ jobs:
         run: |
           if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
             Write-Host "No TAURI_SIGNING_PRIVATE_KEY secret provided; building unsigned CI artifacts."
-            npx tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
+            $ciConfigPath = "src-tauri/tauri.ci.conf.json"
+            Set-Content -Path $ciConfigPath -Value '{"bundle":{"createUpdaterArtifacts":false}}' -Encoding utf8NoBOM
+            try {
+              npx tauri build --config $ciConfigPath
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            } finally {
+              if (Test-Path $ciConfigPath) { Remove-Item $ciConfigPath -Force }
+            }
           } else {
             npx tauri build
           }
